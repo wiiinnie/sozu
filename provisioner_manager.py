@@ -1,11 +1,78 @@
 #!/usr/bin/env python3
 """
-Provisioner Management CLI Tool - Version 1.5
+Provisioner Management CLI Tool - Version 1.7.7
 A command-line interface for managing provisioners with arrow key navigation.
 
-Version: 1.4
-Release Date: 2026-02-03
+Version: 1.7.7
+Release Date: 2026-02-06
 Author: Dusk Network Infrastructure Team
+
+New in v1.7.7:
+- FEATURE: Rotation check interval is now configurable (default: 10 seconds)
+- FEATURE: Health check monitors all 3 rusk nodes with auto-restart (>5 blocks behind)
+- IMPROVEMENT: Top-up pauses during rotation window to avoid conflicts
+- FEATURE: Anomaly detection for externally terminated provisioners
+- FEATURE: Automatic recovery when rotation pattern is broken
+- Added "Edit Rotation Check Interval" to Configuration menu
+
+New in v1.7.6:
+- IMPROVEMENT: Top-up check interval is now configurable (default: 30 seconds)
+- IMPROVEMENT: Status line shows blocks until next epoch transition
+- Added "Edit Top-up Check Interval" to Configuration menu
+
+New in v1.7.5:
+- CRITICAL FIX: Only rotate between index 0 and index 1 (NOT index 2)
+- Index 2 (third provisioner) is fallback only - ignored during normal operations
+- All allocation/rotation logic now filters for idx 0 and 1 only
+- Enhanced debug showing which indices are being considered
+
+New in v1.7.4:
+- CRITICAL FIX: Update stake state immediately after allocations/top-ups
+- Prevents duplicate allocations to the same provisioner
+- State now refreshes after EVERY successful allocation, not just every 100 blocks
+- Enhanced debug showing when state is updated
+
+New in v1.7.3:
+- CRITICAL FIX: Respect TOTAL stake limit across ALL provisioners
+- Calculate remaining capacity before every allocation/top-up
+- Only allocate what fits within total limit (e.g., 1,000 DUSK if 998,999 already staked)
+- Enhanced debug output showing total staked and remaining capacity
+
+New in v1.7.2:
+- AUTOMATED ROTATION with stake maturity intelligence
+- Continuous monitoring loop with 10-second block checks
+- Top-up loop (30-second checks) for maturing provisioners - NO PENALTY!
+- Only rotate TO provisioners with 1 transition seen (penalty-free)
+- Bootstrap handling: Auto-allocate to inactive provisioners
+- Persistent stake checking: Allocate as soon as ≥1000 DUSK available
+- JSON state updates after every rotation
+- Comprehensive DEBUG output for every decision and action
+
+New in v1.7.1:
+- COMPLETE REWORK of "Monitor Epoch Transitions" function
+- Now tracks stake maturity status for all provisioners
+- Captures initial state: inactive, maturing (0 or 1 transitions), or active (2+ transitions)
+- Saves detailed stake state to JSON file
+- Displays comprehensive summary with stake amounts and transition counts
+- Foundation for future automated rotation improvements
+
+New in v1.7:
+- ROTATION SYSTEM REDESIGNED for optimal 2-epoch stake maturation
+- Rotation happens EVERY EPOCH (2160 blocks) instead of every 2 epochs
+- Top-up on MATURING nodes (1 transition) = NO 10% penalty!
+- Automatic slashed stake monitoring after every top-up
+- Warning system when inactive stake exceeds 2% operator limit
+- Explanation: Stakes need 2 epoch transitions to mature (2161-4320 blocks)
+- Strategy: Always top-up nodes with <2 transitions to avoid penalty
+
+New in v1.6:
+- Fixed: Withdraw operator rewards now uses LUX (not DUSK) for unstake amount
+
+New in v1.5:
+- Added: Withdraw Operator Rewards feature
+- Query balance, convert hex→decimal, withdraw with 1 DUSK buffer
+- Fixed: Rotation logic for correct stake distribution
+- Fixed: Active/inactive detection based on stake amount
 
 New in v1.4:
 - Monitor Epoch Transitions (automated monitoring with 10s checks)
@@ -108,6 +175,7 @@ class ProvisionerManager:
             "Liquidate + Terminate Provisioner (Full Removal)",
             "Completely Remove a Provisioner",
             "Check Available Stake",
+            "Withdraw Operator Rewards",
             "Check Stake Info",
             "Check Block Heights",
             "Monitor Epoch Transitions",
@@ -223,12 +291,14 @@ class ProvisionerManager:
         elif selection == 9:
             self.check_available_stake()
         elif selection == 10:
-            self.check_stake_info()
+            self.withdraw_operator_rewards()
         elif selection == 11:
-            self.check_block_heights()
+            self.check_stake_info()
         elif selection == 12:
-            self.monitor_epoch_transitions()
+            self.check_block_heights()
         elif selection == 13:
+            self.monitor_epoch_transitions()
+        elif selection == 14:
             self.show_configuration()
     
     def get_input_curses(self, prompt: str, y: int, x: int = 2) -> Optional[str]:
@@ -557,7 +627,9 @@ class ProvisionerManager:
             "gas_limit": 2000000,
             "operator_address": "",
             "stake_limit": 1000000,  # Maximum stake to allocate per provisioner in DUSK
-            "rotation_trigger_blocks": 50  # Blocks before epoch end to trigger rotation
+            "rotation_trigger_blocks": 50,  # Blocks before epoch end to trigger rotation
+            "rotation_check_interval": 10,  # Seconds between rotation checks
+            "topup_check_interval": 30  # Seconds between top-up checks
         }
         
         if self.config_file.exists():
@@ -1908,6 +1980,230 @@ class ProvisionerManager:
         curses.curs_set(0)
         self.stdscr.keypad(True)
     
+    def withdraw_operator_rewards(self):
+        """Option 11: Withdraw Operator Rewards"""
+        # Temporarily exit curses mode
+        curses.endwin()
+        
+        print(f"\n\033[94m{'=' * 70}\033[0m")
+        print(f"\033[1m\033[96mWITHDRAW OPERATOR REWARDS\033[0m")
+        print(f"\033[94m{'=' * 70}\033[0m\n")
+        
+        try:
+            # Get operator address from config
+            operator_address = self.config.get('operator_address')
+            if not operator_address:
+                print(f"\033[91m✗ Operator address not configured\033[0m")
+                print(f"\033[93mPlease set operator_address in Configuration menu\033[0m\n")
+                input("\nPress Enter to continue...")
+                self._reinit_curses()
+                return
+            
+            contract_address = self.config.get('contract_address')
+            if not contract_address:
+                print(f"\033[91m✗ Contract address not configured\033[0m\n")
+                input("\nPress Enter to continue...")
+                self._reinit_curses()
+                return
+            
+            # STEP 1: Calculate balance payload
+            print(f"\033[1m\033[96mSTEP 1: Calculating Balance Payload\033[0m")
+            print(f"\033[94m{'─' * 70}\033[0m\n")
+            
+            payload_command = f"""sozu-beta3-rusk-wallet -w ~/sozu_operator -n testnet calculate-payload-balance-of \
+  --public-key {operator_address}"""
+            
+            if self.wallet_password_decrypted:
+                print(f"\033[92mExecuting payload calculation (using stored password)...\033[0m\n")
+            else:
+                print(f"\033[94mExecuting payload calculation...\033[0m")
+                print(f"\033[93mNote: You will be prompted for your wallet password.\033[0m\n")
+            
+            success, output = self.execute_wallet_command(payload_command)
+            
+            if not success:
+                print(f"\n\033[91m✗ Failed to calculate balance payload\033[0m\n")
+                input("\nPress Enter to continue...")
+                self._reinit_curses()
+                return
+            
+            # Extract payload (remove quotes)
+            payload_match = re.search(r'"([0-9a-fA-F]+)"', output)
+            if not payload_match:
+                lines = [line.strip() for line in output.split('\n') if line.strip()]
+                if lines:
+                    balance_payload = lines[-1].strip().strip('"')
+                else:
+                    print(f"\n\033[91m✗ Could not extract balance payload\033[0m\n")
+                    input("\nPress Enter to continue...")
+                    self._reinit_curses()
+                    return
+            else:
+                balance_payload = payload_match.group(1)
+            
+            print(f"\033[92m✓ Balance payload generated\033[0m")
+            print(f"\033[90m  Payload: {balance_payload[:32]}...{balance_payload[-32:]}\033[0m\n")
+            
+            # STEP 2: Query balance from contract
+            print(f"\033[1m\033[96mSTEP 2: Querying Balance from Contract\033[0m")
+            print(f"\033[94m{'─' * 70}\033[0m\n")
+            
+            curl_command = f"curl -s -X POST -d '0x{balance_payload}' https://testnet.nodes.dusk.network/on/contracts:{contract_address}/balance_of"
+            
+            print(f"\033[94mQuerying contract...\033[0m\n")
+            
+            result = subprocess.run(
+                curl_command,
+                shell=True,
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            
+            if not result.stdout:
+                print(f"\033[91m✗ No response from contract\033[0m\n")
+                input("\nPress Enter to continue...")
+                self._reinit_curses()
+                return
+            
+            # Extract hex balance (remove newlines and trailing text)
+            hex_balance = result.stdout.strip().split('\n')[0].strip()
+            # Remove any trailing text after the hex (like "root@...")
+            hex_balance = hex_balance.split('root@')[0].strip()
+            
+            if not re.match(r'^[0-9a-fA-F]+$', hex_balance):
+                print(f"\033[91m✗ Invalid hex balance received: {hex_balance}\033[0m\n")
+                input("\nPress Enter to continue...")
+                self._reinit_curses()
+                return
+            
+            print(f"\033[92m✓ Balance received from contract\033[0m")
+            print(f"\033[90m  Hex: {hex_balance}\033[0m\n")
+            
+            # STEP 3: Convert hex to decimal (Little-Endian)
+            print(f"\033[1m\033[96mSTEP 3: Converting Hex to Decimal\033[0m")
+            print(f"\033[94m{'─' * 70}\033[0m\n")
+            
+            # Parse as little-endian 64-bit integer
+            # Extract bytes in pairs
+            bytes_list = []
+            for i in range(0, min(len(hex_balance), 16), 2):
+                bytes_list.append(int(hex_balance[i:i+2], 16))
+            
+            # Convert to decimal (little-endian)
+            balance_lux = 0
+            for i, byte in enumerate(bytes_list):
+                balance_lux += byte << (i * 8)
+            
+            balance_dusk = balance_lux / 1_000_000_000
+            
+            print(f"\033[92m✓ Conversion complete\033[0m")
+            print(f"\033[96m  Balance (LUX):  {balance_lux:,}\033[0m")
+            print(f"\033[96m  Balance (DUSK): {balance_dusk:,.9f}\033[0m\n")
+            
+            if balance_lux == 0:
+                print(f"\033[93m⚠ No rewards available to withdraw\033[0m\n")
+                input("\nPress Enter to continue...")
+                self._reinit_curses()
+                return
+            
+            # Calculate withdrawable amount (full DUSK minus 1 DUSK buffer)
+            withdrawable_dusk = int(balance_dusk) - 1
+            
+            if withdrawable_dusk <= 0:
+                print(f"\033[93m⚠ Insufficient balance to withdraw (need >1 DUSK)\033[0m\n")
+                input("\nPress Enter to continue...")
+                self._reinit_curses()
+                return
+            
+            print(f"\033[1m\033[93m{'─' * 70}\033[0m")
+            print(f"\033[1m\033[93mWITHDRAWAL CALCULATION\033[0m")
+            print(f"\033[1m\033[93m{'─' * 70}\033[0m")
+            print(f"\033[96mAvailable:    {balance_dusk:,.2f} DUSK\033[0m")
+            print(f"\033[96mBuffer:       1 DUSK\033[0m")
+            print(f"\033[92mWithdrawable: {withdrawable_dusk:,} DUSK\033[0m")
+            print(f"\033[1m\033[93m{'─' * 70}\033[0m\n")
+            
+            # Confirm withdrawal
+            confirm = input(f"\033[93mProceed with withdrawal of {withdrawable_dusk:,} DUSK? (yes/no): \033[0m").strip().lower()
+            if confirm not in ['yes', 'y']:
+                print(f"\033[93mWithdrawal cancelled.\033[0m\n")
+                input("\nPress Enter to continue...")
+                self._reinit_curses()
+                return
+            
+            # STEP 4: Withdraw rewards
+            print(f"\n\033[1m\033[96mSTEP 4: Withdrawing Rewards\033[0m")
+            print(f"\033[94m{'─' * 70}\033[0m\n")
+            
+            # 4a: Calculate unstake payload
+            # IMPORTANT: unstake-amount must be in LUX, not DUSK!
+            withdrawable_lux = int(withdrawable_dusk * 1_000_000_000)
+            
+            print(f"\033[94mCalculating unstake payload for {withdrawable_dusk:,} DUSK ({withdrawable_lux:,} LUX)...\033[0m\n")
+            
+            unstake_payload_command = f"""sozu-beta3-rusk-wallet -w ~/sozu_operator -n testnet calculate-payload-sozu-unstake \
+  --unstake-amount {withdrawable_lux}"""
+            
+            success, output = self.execute_wallet_command(unstake_payload_command)
+            
+            if not success:
+                print(f"\n\033[91m✗ Failed to calculate unstake payload\033[0m\n")
+                input("\nPress Enter to continue...")
+                self._reinit_curses()
+                return
+            
+            # Extract unstake payload
+            unstake_payload_match = re.search(r'"([0-9a-fA-F]+)"', output)
+            if not unstake_payload_match:
+                lines = [line.strip() for line in output.split('\n') if line.strip()]
+                if lines:
+                    unstake_payload = lines[-1].strip().strip('"')
+                else:
+                    print(f"\n\033[91m✗ Could not extract unstake payload\033[0m\n")
+                    input("\nPress Enter to continue...")
+                    self._reinit_curses()
+                    return
+            else:
+                unstake_payload = unstake_payload_match.group(1)
+            
+            print(f"\033[92m✓ Unstake payload generated\033[0m\n")
+            
+            # 4b: Execute contract call
+            print(f"\033[94mExecuting withdrawal...\033[0m\n")
+            
+            withdraw_command = f"""sozu-beta3-rusk-wallet -w ~/sozu_operator -n testnet contract-call \
+  --contract-id {contract_address} \
+  --fn-name sozu_unstake \
+  --fn-args "{unstake_payload}" \
+  --gas-limit 2000000"""
+            
+            success, _ = self.execute_wallet_command(withdraw_command)
+            
+            print()
+            if success:
+                print(f"\033[92m{'=' * 70}\033[0m")
+                print(f"\033[92m✓ WITHDRAWAL SUCCESSFUL!\033[0m")
+                print(f"\033[92m  Withdrawn: {withdrawable_dusk:,} DUSK\033[0m")
+                print(f"\033[92m  Remaining buffer: 1 DUSK\033[0m")
+                print(f"\033[92m{'=' * 70}\033[0m")
+            else:
+                print(f"\033[91m{'=' * 70}\033[0m")
+                print(f"\033[91m✗ Withdrawal failed\033[0m")
+                print(f"\033[91m{'=' * 70}\033[0m")
+        
+        except subprocess.CalledProcessError as e:
+            print(f"\n\033[91m✗ Command failed:\033[0m")
+            if e.stderr:
+                print(e.stderr)
+        except Exception as e:
+            print(f"\n\033[91m✗ Unexpected error: {str(e)}\033[0m")
+            import traceback
+            traceback.print_exc()
+        
+        input("\nPress Enter to continue...")
+        self._reinit_curses()
+    
     def check_stake_info(self):
         """Option 10: Check Stake Info for Each Provisioner"""
         # Temporarily exit curses mode
@@ -2161,7 +2457,7 @@ class ProvisionerManager:
     
     def _check_provisioner_stake(self, idx: int) -> Dict:
         """Check stake for a single provisioner by index
-        Returns dict with 'has_stake', 'amount', and 'output'
+        Returns dict with 'has_stake', 'amount', 'slashed_stake', and 'output'
         """
         try:
             stake_info_command = f"sozu-beta3-rusk-wallet -w ~/sozu_provisioner -n testnet stake-info --profile-idx {idx}"
@@ -2172,52 +2468,56 @@ class ProvisionerManager:
             # if output:
             #     print(f"[DEBUG] First 200 chars: {output[:200]}")
             
+            result = {
+                'has_stake': False,
+                'amount': 0,
+                'slashed_stake': 0,
+                'output': output if output else "No output"
+            }
+            
             if success and output:
                 # Parse output for "Eligible stake: <amount> DUSK"
                 if "Eligible stake:" in output:
                     # Extract amount
                     match = re.search(r'Eligible stake:\s*(\d+(?:\.\d+)?)\s*DUSK', output)
                     if match:
-                        amount = float(match.group(1))
-                        return {
-                            'has_stake': True,
-                            'amount': amount,
-                            'output': output
-                        }
+                        result['has_stake'] = True
+                        result['amount'] = float(match.group(1))
+                    
+                    # Extract slashed stake (reclaimable)
+                    slashed_match = re.search(r'Reclaimable slashed stake:\s*(\d+(?:\.\d+)?)\s*DUSK', output)
+                    if slashed_match:
+                        result['slashed_stake'] = float(slashed_match.group(1))
+                    
+                    return result
+                    
                 elif "A stake does not exist for this key" in output:
-                    return {
-                        'has_stake': False,
-                        'amount': 0,
-                        'output': output
-                    }
+                    return result
             
             # Check output even if success=False (might still have useful info)
             if output:
                 if "Eligible stake:" in output:
                     match = re.search(r'Eligible stake:\s*(\d+(?:\.\d+)?)\s*DUSK', output)
                     if match:
-                        amount = float(match.group(1))
-                        return {
-                            'has_stake': True,
-                            'amount': amount,
-                            'output': output
-                        }
+                        result['has_stake'] = True
+                        result['amount'] = float(match.group(1))
+                    
+                    slashed_match = re.search(r'Reclaimable slashed stake:\s*(\d+(?:\.\d+)?)\s*DUSK', output)
+                    if slashed_match:
+                        result['slashed_stake'] = float(slashed_match.group(1))
+                    
+                    return result
+                    
                 elif "A stake does not exist for this key" in output:
-                    return {
-                        'has_stake': False,
-                        'amount': 0,
-                        'output': output
-                    }
+                    return result
             
-            return {
-                'has_stake': False,
-                'amount': 0,
-                'output': output if output else "No output"
-            }
+            return result
+            
         except Exception as e:
             return {
                 'has_stake': False,
                 'amount': 0,
+                'slashed_stake': 0,
                 'output': f"Error: {str(e)}"
             }
     
@@ -2323,7 +2623,14 @@ class ProvisionerManager:
     
     def _topup_active_provisioner(self, active: Dict, available_stake: float) -> bool:
         """Top-up active provisioner to reach max capacity
+        
         Max capacity = stake_limit - 1001 (to allow 1000 for other provisioner)
+        
+        IMPORTANT: When topping up an ACTIVE node (>=2 transitions), 10% of the 
+        top-up amount becomes inactive (penalty). This is checked after every top-up.
+        
+        When topping up a MATURING node (<2 transitions), there is NO penalty!
+        
         Returns True if top-up was executed, False otherwise
         """
         try:
@@ -2409,6 +2716,33 @@ class ProvisionerManager:
                 print(f"\033[92m✓ Successfully added {amount_to_add:,.0f} DUSK to provisioner!\033[0m")
                 print(f"\033[92m  New total stake: {current_stake + amount_to_add:,.0f} DUSK\033[0m")
                 print(f"\033[92m{'=' * 70}\033[0m\n")
+                
+                # Check slashed stake after top-up (10% penalty if node is active)
+                print(f"\033[94mChecking for inactive stake (slashed/penalty)...\033[0m\n")
+                stake_info = self._check_provisioner_stake(active['idx'])
+                slashed_stake = stake_info.get('slashed_stake', 0)
+                
+                if slashed_stake > 0:
+                    # Calculate 2% limit
+                    operator_limit = self.config.get('stake_limit', 1000000)
+                    max_slashed = operator_limit * 0.02  # 2% of operator limit
+                    percentage = (slashed_stake / operator_limit) * 100
+                    
+                    print(f"\033[93m⚠  INACTIVE STAKE DETECTED\033[0m")
+                    print(f"\033[96m  Reclaimable slashed stake: {slashed_stake:,.2f} DUSK\033[0m")
+                    print(f"\033[96m  Operator limit: {operator_limit:,} DUSK\033[0m")
+                    print(f"\033[96m  Percentage: {percentage:.2f}%\033[0m")
+                    print(f"\033[96m  Max allowed: {max_slashed:,.0f} DUSK (2%)\033[0m\n")
+                    
+                    if slashed_stake > max_slashed:
+                        print(f"\033[91m✗ WARNING: Inactive stake exceeds 2% limit!\033[0m")
+                        print(f"\033[91m  This may prevent provisioner from being active.\033[0m")
+                        print(f"\033[91m  Consider liquidating & terminating to reclaim stake.\033[0m\n")
+                    else:
+                        print(f"\033[92m✓ Inactive stake is within acceptable limits\033[0m\n")
+                else:
+                    print(f"\033[92m✓ No inactive stake detected\033[0m\n")
+                
                 return True
             else:
                 print(f"\n\033[91m✗ Failed to add stake\033[0m\n")
@@ -2577,10 +2911,20 @@ class ProvisionerManager:
             return False
     
     def _execute_rotation(self, active: Dict, inactive: Dict) -> bool:
-        """Execute full rotation sequence
-        1. Liquidate & terminate active provisioner
-        2. Allocate 1000 DUSK back to that provisioner  
-        3. Allocate (limit - 1001) DUSK to inactive provisioner
+        """Execute full rotation sequence (EVERY EPOCH)
+        
+        Rotation happens EVERY epoch (2160 blocks), triggered 50 blocks before end.
+        
+        The 'inactive' node has 1000 DUSK staked with 1 transition (maturing).
+        When we top-up this maturing node, there is NO 10% penalty because it's not yet active!
+        
+        Steps:
+        1. Liquidate & terminate active provisioner (the one with large stake)
+        2. Allocate 1000 DUSK back to that provisioner (starts maturation)
+        3. Top-up the maturing provisioner from 1000 → (limit-1001) DUSK
+           - No penalty because node only has 1 transition (not active yet)
+           - After next epoch transition, this node becomes fully active
+        
         Returns True if successful, False otherwise
         """
         try:
@@ -2938,26 +3282,26 @@ class ProvisionerManager:
             return False
     
     def monitor_epoch_transitions(self):
-        """Option 12: Monitor Epoch Transitions (Automated)"""
-        # Temporarily exit curses mode
+        """Option 12: Monitor epoch transitions - Automated rotation with stake maturity intelligence"""
+        # Exit curses for raw terminal output
         curses.endwin()
         
-        # Define constants first
         EPOCH_BLOCKS = 2160
-        TRIGGER_BLOCKS_BEFORE = self.config.get('rotation_trigger_blocks', 50)  # Configurable
-        CHECK_BLOCKS_BEFORE = 100  # When to check active provisioner
-        CHECK_INTERVAL = 10  # seconds
-        TOPUP_CHECK_INTERVAL = 100  # Check for top-up every 100 blocks
+        ROTATION_CHECK_INTERVAL = self.config.get('rotation_check_interval', 10)  # seconds - check for rotation triggers
+        TOPUP_CHECK_INTERVAL = self.config.get('topup_check_interval', 30)  # seconds - check for top-up opportunities
         
         print(f"\n\033[94m{'=' * 70}\033[0m")
-        print(f"\033[1m\033[96mMONITOR EPOCH TRANSITIONS\033[0m")
+        print(f"\033[1m\033[96mAUTOMATED EPOCH MONITORING & ROTATION\033[0m")
         print(f"\033[94m{'=' * 70}\033[0m\n")
-        print(f"\033[93mMonitoring epochs every 10 seconds...\033[0m")
-        print(f"\033[93mPress 'q' + Enter or Ctrl+C to stop\033[0m")
-        print(f"\033[90mRotating between: Instance 1 (idx 0) ↔ Instance 2 (idx 1)\033[0m")
-        print(f"\033[90mFallback only: Instance 3 (idx 2)\033[0m")
-        print(f"\033[90mRotation trigger: {TRIGGER_BLOCKS_BEFORE} blocks before epoch end\033[0m")
-        print(f"\033[90mTop-up check: Every 100 blocks\033[0m\n")
+        print(f"\033[93m🤖 Intelligent rotation with stake maturity tracking\033[0m")
+        print(f"\033[93m⚡ Top-up during maturing phase (penalty-free!)\033[0m")
+        print(f"\033[93m🔄 Only rotate TO provisioners with 1 transition seen\033[0m")
+        print(f"\033[93m📊 JSON state updates after every action\033[0m")
+        print(f"\033[93m🎯 Rotation between idx 0 and idx 1 ONLY (idx 2 is fallback)\033[0m")
+        print(f"\033[93m🏥 Health monitoring with auto-restart (>5 blocks behind)\033[0m\n")
+        print(f"\033[90mRotation check: Every {ROTATION_CHECK_INTERVAL} seconds\033[0m")
+        print(f"\033[90mTop-up check: Every {TOPUP_CHECK_INTERVAL} seconds\033[0m")
+        print(f"\033[90mPress Ctrl+C to stop\033[0m\n")
         
         log_files = [
             '/var/log/rusk-1.log',
@@ -2965,308 +3309,113 @@ class ProvisionerManager:
             '/var/log/rusk-3.log'
         ]
         
-        triggered_epoch = None  # Track which epoch we've already triggered for
-        checked_epoch = None  # Track which epoch we've checked stake for
-        last_topup_check_height = 0  # Track last height where we checked for top-up
+        state_file = self.storage_dir / "stake_state.json"
+        last_rotation_epoch = None
+        last_topup_check = 0
         
-        # DEBUG: Check stake detection at startup - EXACT same code as check_stake_info
-        print(f"\033[1m\033[93m{'─' * 70}\033[0m")
-        print(f"\033[1m\033[93mDEBUG: Initial Stake Check\033[0m")
-        print(f"\033[1m\033[93m{'─' * 70}\033[0m\n")
+        # Load or create initial state
+        print(f"\033[1m\033[96m{'─' * 70}\033[0m")
+        print(f"\033[1m\033[96mINITIALIZATION\033[0m")
+        print(f"\033[1m\033[96m{'─' * 70}\033[0m\n")
         
-        print(f"[DEBUG] Checking encryption password...")
-        # Use stored encryption password from session
-        if not self.encryption_password:
-            print(f"\033[91m✗ Encryption password not available.\033[0m\n")
-        else:
-            print(f"[DEBUG] Encryption password OK, loading keys...")
-            # Load stored provisioners to get their indices
-            stored_keys = self._decrypt_keys(self.encryption_password)
-            
-            if stored_keys is None:
-                print(f"\033[91m✗ Could not load stored keys (None returned).\033[0m\n")
-            elif not stored_keys:
-                print(f"\033[93m⚠ No provisioners stored yet (empty dict).\033[0m\n")
-            else:
-                print(f"[DEBUG] Loaded {len(stored_keys)} keys, sorting...")
-                # Sort provisioners by index
-                sorted_provisioners = sorted(stored_keys.items(), key=lambda x: int(x[1].get('index', 0)))
-                
-                print(f"[DEBUG] Starting provisioner queries...\n")
-                # Query each provisioner (only idx 0 and 1)
-                for prov_id, data in sorted_provisioners:
-                    idx = int(data['index'])  # Convert to int!
-                    if idx not in [0, 1]:
-                        print(f"[DEBUG] Skipping idx {idx} (not 0 or 1)")
-                        continue
-                    
-                    address = data.get('address', 'N/A')
-                    
-                    print(f"\033[1m\033[96m{'─' * 70}\033[0m")
-                    print(f"\033[96mProvisioner Index {idx}\033[0m")
-                    print(f"\033[90m  {prov_id}\033[0m")
-                    print(f"\033[90m  Address: {address[:50]}...\033[0m")
-                    print(f"\033[1m\033[96m{'─' * 70}\033[0m\n")
-                    
-                    # Build the command - EXACT same as check_stake_info
-                    stake_info_command = f"sozu-beta3-rusk-wallet -w ~/sozu_provisioner -n testnet stake-info --profile-idx {idx}"
-                    
-                    print(f"\033[92mQuerying stake info (using stored password)...\033[0m\n")
-                    
-                    # Execute command - EXACT same as check_stake_info
-                    success, output = self.execute_wallet_command(stake_info_command)
-                    
-                    print()
-                    
-                    if success:
-                        if "Eligible stake:" in output:
-                            match = re.search(r'Eligible stake:\s*(\d+(?:\.\d+)?)\s*DUSK', output)
-                            if match:
-                                print(f"  \033[92m✓ Stake info retrieved for index {idx}\033[0m")
-                                print(f"  \033[92m✓ HAS STAKE: {match.group(1)} DUSK\033[0m\n")
-                            else:
-                                print(f"  \033[93m? Found 'Eligible stake:' but couldn't parse amount\033[0m\n")
-                        elif "A stake does not exist" in output:
-                            print(f"  \033[92m✓ Stake info retrieved for index {idx}\033[0m")
-                            print(f"  \033[90m✗ No stake\033[0m\n")
-                        else:
-                            print(f"  \033[93m? Unknown output format\033[0m\n")
-                    else:
-                        print(f"  \033[91m✗ Failed to retrieve stake info for index {idx}\033[0m\n")
+        stake_db = self._load_or_create_stake_state(state_file)
         
-        print(f"\033[1m\033[93m{'─' * 70}\033[0m\n")
-        
-        # PAUSE so user can see debug output
-        input("\033[96mPress Enter to start monitoring...\033[0m")
+        print(f"\n\033[92m✓ Ready to monitor!\033[0m\n")
+        input("Press Enter to start monitoring...")
         print()
         
         try:
             while True:
-                # Check if user wants to quit
-                import select
-                if select.select([sys.stdin], [], [], 0.0)[0]:
-                    user_input = sys.stdin.readline().strip().lower()
-                    if user_input == 'q':
-                        print(f"\n\033[93mStopping monitoring...\033[0m")
-                        break
-                
-                # Get heights from all instances
+                # Get current heights from all nodes
                 heights = []
-                for log_file in log_files:
+                node_heights = {}
+                for i, log_file in enumerate(log_files, 1):
                     height = self._get_block_height_from_log(log_file)
                     if height:
                         heights.append((log_file, height))
+                        node_heights[i] = height
                 
                 if not heights:
-                    print(f"\033[91m[{time.strftime('%H:%M:%S')}] ✗ No heights available from any instance\033[0m")
-                    time.sleep(CHECK_INTERVAL)
+                    print(f"\033[91m[{time.strftime('%H:%M:%S')}] ✗ No heights available\033[0m")
+                    time.sleep(ROTATION_CHECK_INTERVAL)
                     continue
                 
-                # Use highest height
+                # Health check: Detect and restart stuck nodes (>5 blocks behind)
+                highest_height = max(node_heights.values())
+                for node_id, height in node_heights.items():
+                    blocks_behind = highest_height - height
+                    
+                    if blocks_behind > 5:
+                        print(f"\n\033[91m[HEALTH] ⚠️ Node {node_id} stuck at {height:,} ({blocks_behind} blocks behind!)\033[0m")
+                        print(f"\033[93m[HEALTH] 🔄 Restarting rusk-{node_id}...\033[0m")
+                        
+                        # Restart the stuck node
+                        restart_result = os.system(f'systemctl restart rusk-{node_id}')
+                        if restart_result != 0:
+                            print(f"\033[91m[HEALTH] ✗ Failed to restart rusk-{node_id}\033[0m")
+                            continue
+                        
+                        # Wait for restart
+                        time.sleep(5)
+                        
+                        # Verify recovery
+                        new_height = self._get_block_height_from_log(f'/var/log/rusk-{node_id}.log')
+                        if new_height and new_height > height:
+                            print(f"\033[92m[HEALTH] ✅ Node {node_id} recovered! New height: {new_height:,}\033[0m\n")
+                            node_heights[node_id] = new_height
+                        else:
+                            print(f"\033[91m[HEALTH] ❌ Node {node_id} still stuck after restart!\033[0m\n")
+                
                 highest = max(heights, key=lambda x: x[1])
                 current_height = highest[1]
-                
-                # Calculate epoch information
                 current_epoch = ((current_height - 1) // EPOCH_BLOCKS) + 1
-                epoch_start = (current_epoch - 1) * EPOCH_BLOCKS + 1
+                
+                # Calculate blocks until next epoch transition
                 epoch_end = current_epoch * EPOCH_BLOCKS
-                blocks_in_epoch = current_height - epoch_start + 1
-                blocks_until_end = epoch_end - current_height
-                trigger_point = epoch_end - TRIGGER_BLOCKS_BEFORE
+                blocks_until_transition = epoch_end - current_height
                 
-                # Check sync status
-                all_heights = [h[1] for h in heights]
-                max_height = max(all_heights)
-                min_height = min(all_heights)
-                height_diff = max_height - min_height
-                
-                # Display status
+                # Display current status
                 timestamp = time.strftime('%H:%M:%S')
-                print(f"\033[96m[{timestamp}]\033[0m ", end='')
-                print(f"Height: \033[92m{current_height}\033[0m | ", end='')
-                print(f"Epoch: \033[96m{current_epoch}\033[0m | ", end='')
-                print(f"Block {blocks_in_epoch}/{EPOCH_BLOCKS} | ", end='')
-                print(f"Until end: \033[93m{blocks_until_end}\033[0m", end='')
+                print(f"\033[96m[{timestamp}]\033[0m Height: \033[92m{current_height:,}\033[0m | Epoch: \033[96m{current_epoch}\033[0m | Until transition: \033[93m{blocks_until_transition}\033[0m blocks")
                 
-                # Sync status
-                if len(heights) < 3:
-                    print(f" | \033[91m⚠ Only {len(heights)}/3 instances\033[0m", end='')
-                elif height_diff > 5:
-                    print(f" | \033[91m⚠ Sync diff: {height_diff} blocks!\033[0m", end='')
-                elif height_diff > 0:
-                    print(f" | \033[93m⚠ Sync diff: {height_diff}\033[0m", end='')
-                else:
-                    print(f" | \033[92m✓ In sync\033[0m", end='')
+                # Update state periodically (every 100 blocks)
+                if current_height % 100 == 0:
+                    print(f"\n\033[93m[DEBUG] 100-block checkpoint - updating stake state...\033[0m")
+                    stake_db = self._update_stake_state(state_file, current_height)
                 
-                print()  # Newline
+                # Check for anomalies (externally terminated provisioners)
+                anomaly_detected = self._check_for_anomaly(stake_db, current_height)
+                if anomaly_detected:
+                    stake_db = self._update_stake_state(state_file, current_height)
                 
-                # Calculate trigger and check points
-                trigger_point = epoch_end - TRIGGER_BLOCKS_BEFORE
-                check_point = epoch_end - CHECK_BLOCKS_BEFORE
+                # Check for rotation trigger
+                rotation_needed, rotation_target = self._check_rotation_trigger(stake_db, current_height, current_epoch, last_rotation_epoch)
                 
-                # Top-up check: Every 100 blocks, check if we can add more stake to active provisioner
-                # This runs throughout the epoch, not just near the end
-                if current_height - last_topup_check_height >= TOPUP_CHECK_INTERVAL:
-                    active = self._get_active_provisioner()
-                    
-                    if active:
-                        stake_limit = self.config.get('stake_limit', 1000000)
-                        current_stake = active['amount']
-                        
-                        # Check if there's room to add more
-                        if current_stake < stake_limit - 1:
-                            available_stake = self._check_available_stake()
-                            
-                            if available_stake and available_stake > 0:
-                                # Attempt top-up
-                                self._topup_active_provisioner(active, available_stake)
-                    
-                    # Update last check height
-                    last_topup_check_height = current_height
-                
-                # 100-block checkpoint: Check active provisioner and plan rotation
-                if current_height >= check_point and checked_epoch != current_epoch and blocks_until_end <= CHECK_BLOCKS_BEFORE:
-                    print(f"\n\033[1m\033[93m{'─' * 70}\033[0m")
-                    print(f"\033[1m\033[93m⚙  100-BLOCK CHECKPOINT (Block {current_height}/{epoch_end})\033[0m")
-                    print(f"\033[1m\033[93m⚙  Checking active provisioner for rotation planning...\033[0m")
-                    print(f"\033[1m\033[93m{'─' * 70}\033[0m\n")
-                    
-                    # Find active provisioner
-                    print(f"\033[96m[1/4] Checking which provisioner currently has stake...\033[0m")
-                    active = self._get_active_provisioner()
-                    
-                    if active:
-                        print(f"\033[92m✓ Found active provisioner:\033[0m")
-                        print(f"  Index: {active['idx']}")
-                        print(f"  ID: {active['prov_id']}")
-                        print(f"  Address: {active['address'][:60]}...")
-                        print(f"  Stake: {active['amount']:,.0f} DUSK\n")
-                        
-                        # Check available stake
-                        print(f"\033[96m[2/4] Checking available stake in contract...\033[0m")
-                        available_stake = self._check_available_stake()
-                        
-                        if available_stake:
-                            print(f"\033[92m✓ Available stake: {available_stake:,.2f} DUSK\033[0m\n")
-                            
-                            # Get inactive provisioners
-                            print(f"\033[96m[3/4] Finding inactive provisioners...\033[0m")
-                            inactive = self._get_inactive_provisioners(active['idx'])
-                            
-                            if inactive:
-                                print(f"\033[92m✓ Found {len(inactive)} inactive provisioner(s)\033[0m\n")
-                                
-                                # Calculate stake to allocate
-                                stake_limit = self.config.get('stake_limit', 1000000)
-                                # After liquidation, available will increase by active amount
-                                future_available = available_stake + active['amount']
-                                stake_to_allocate = min(stake_limit - 1, future_available)
-                                
-                                print(f"\033[96m[4/4] Planning rotation (DRY RUN)...\033[0m\n")
-                                
-                                # Calculate amounts for the plan
-                                small_stake = 1000  # DUSK to put back
-                                large_stake = stake_limit - 1001  # Large stake (998999 for 1m limit)
-                                
-                                print(f"\033[1m\033[95m{'═' * 70}\033[0m")
-                                print(f"\033[1m\033[95mROTATION PLAN (DRY RUN - NOT EXECUTING)\033[0m")
-                                print(f"\033[1m\033[95m{'═' * 70}\033[0m")
-                                
-                                print(f"\n\033[93m📋 STEP 1: LIQUIDATE & TERMINATE\033[0m")
-                                print(f"  \033[90mWould execute: _automated_liquidate_and_terminate()\033[0m")
-                                print(f"  Target: Provisioner index {active['idx']} ({active['prov_id']})")
-                                print(f"  Address: {active['address'][:60]}...")
-                                print(f"  This will release: {active['amount']:,.0f} DUSK")
-                                print(f"  \033[90mNo wait - liquidate then terminate immediately\033[0m")
-                                
-                                print(f"\n\033[93m📋 STEP 2: CHECK AVAILABLE STAKE\033[0m")
-                                print(f"  Current available: {available_stake:,.2f} DUSK")
-                                print(f"  After liquidation: {future_available:,.2f} DUSK")
-                                
-                                print(f"\n\033[93m📋 STEP 3: ALLOCATE 1,000 DUSK BACK\033[0m")
-                                print(f"  \033[90mWould execute: allocate_stake()\033[0m")
-                                print(f"  Target: Provisioner index {active['idx']} ({active['prov_id']}) ← Just liquidated")
-                                print(f"  Address: {active['address'][:60]}...")
-                                print(f"  Amount to allocate: {small_stake:,.0f} DUSK")
-                                print(f"  Purpose: Keep provisioner ready for next rotation")
-                                
-                                # Calculate what to add to inactive
-                                current_inactive_stake = inactive[0].get('amount', 0)
-                                amount_to_add_to_inactive = large_stake - current_inactive_stake
-                                
-                                print(f"\n\033[93m📋 STEP 4: TOP-UP INACTIVE TO {large_stake:,.0f} DUSK\033[0m")
-                                print(f"  \033[90mWould execute: top-up (stake_activate)\033[0m")
-                                print(f"  Target: Provisioner index {inactive[0]['idx']} ({inactive[0]['prov_id']})")
-                                print(f"  Address: {inactive[0]['address'][:60]}...")
-                                print(f"  Current stake: {current_inactive_stake:,.0f} DUSK")
-                                print(f"  Target stake: {large_stake:,.0f} DUSK")
-                                print(f"  Amount to ADD: {amount_to_add_to_inactive:,.0f} DUSK")
-                                print(f"  \033[90mNote: Inactive provisioner is NOT liquidated, only topped up\033[0m")
-                                print(f"  Calculation: target - current = {large_stake:,.0f} - {current_inactive_stake:,.0f} = {amount_to_add_to_inactive:,.0f}")
-                                
-                                print(f"\n\033[1m\033[93m📊 FINAL DISTRIBUTION AFTER ROTATION:\033[0m")
-                                print(f"  Provisioner index {active['idx']}: {small_stake:,.0f} DUSK")
-                                print(f"  Provisioner index {inactive[0]['idx']}: {large_stake:,.0f} DUSK ← New active")
-                                print(f"  Total staked: {small_stake + large_stake:,.0f} DUSK (under limit: {stake_limit:,.0f})")
-
-                                
-                                print(f"\n\033[1m\033[95m{'═' * 70}\033[0m")
-                                print(f"\033[1m\033[92m✓ Rotation plan ready - will execute at {TRIGGER_BLOCKS_BEFORE}-block trigger\033[0m")
-                                print(f"\033[1m\033[95m{'═' * 70}\033[0m\n")
-                            else:
-                                print(f"\033[91m✗ No inactive provisioners found\033[0m\n")
-                        else:
-                            print(f"\033[91m✗ Could not check available stake\033[0m\n")
-                    else:
-                        print(f"\033[93m⚠ No active provisioner found (no stake allocated)\033[0m\n")
-                    
-                    # Mark this epoch as checked
-                    checked_epoch = current_epoch
-                
-                # Rotation trigger: Execute rotation
-                if current_height >= trigger_point and triggered_epoch != current_epoch:
+                if rotation_needed and rotation_target:
                     print(f"\n\033[1m\033[91m{'!' * 70}\033[0m")
-                    print(f"\033[1m\033[91m⚠  EPOCH END APPROACHING! (Block {current_height}/{epoch_end})\033[0m")
-                    print(f"\033[1m\033[91m⚠  {blocks_until_end} blocks until epoch {current_epoch} ends!\033[0m")
+                    print(f"\033[1m\033[91m🔄 ROTATION TRIGGER ACTIVATED!\033[0m")
                     print(f"\033[1m\033[91m{'!' * 70}\033[0m\n")
                     
-                    print(f"\033[1m\033[93m>>> EXECUTING ROTATION NOW <<<\033[0m\n")
+                    success = self._execute_smart_rotation(stake_db, rotation_target, current_height)
                     
-                    # Get current active and inactive provisioners
-                    active = self._get_active_provisioner()
-                    if not active:
-                        print(f"\033[91m✗ Cannot execute rotation: No active provisioner found\033[0m\n")
-                        triggered_epoch = current_epoch
-                        continue
-                    
-                    inactive_list = self._get_inactive_provisioners(active['idx'])
-                    if not inactive_list:
-                        print(f"\033[91m✗ Cannot execute rotation: No inactive provisioner found\033[0m\n")
-                        triggered_epoch = current_epoch
-                        continue
-                    
-                    inactive = inactive_list[0]  # Take first inactive
-                    
-                    # Execute the rotation
-                    rotation_success = self._execute_rotation(active, inactive)
-                    
-                    if rotation_success:
-                        print(f"\n\033[1m\033[92m{'═' * 70}\033[0m")
-                        print(f"\033[1m\033[92m✓ ROTATION EXECUTED SUCCESSFULLY FOR EPOCH {current_epoch}!\033[0m")
-                        print(f"\033[1m\033[92m{'═' * 70}\033[0m\n")
+                    if success:
+                        last_rotation_epoch = current_epoch
+                        stake_db = self._update_stake_state(state_file, current_height)
+                        print(f"\n\033[92m✓ Rotation complete! State updated.\033[0m\n")
                     else:
-                        print(f"\n\033[1m\033[91m{'═' * 70}\033[0m")
-                        print(f"\033[1m\033[91m✗ ROTATION FAILED FOR EPOCH {current_epoch}\033[0m")
-                        print(f"\033[1m\033[91m{'═' * 70}\033[0m\n")
-                    
-                    # Mark this epoch as triggered
-                    triggered_epoch = current_epoch
+                        print(f"\n\033[91m✗ Rotation failed!\033[0m\n")
+                
+                # Top-up check (every configured interval)
+                if time.time() - last_topup_check >= TOPUP_CHECK_INTERVAL:
+                    print(f"\n\033[93m[DEBUG] Top-up check triggered...\033[0m")
+                    stake_db = self._check_and_topup(stake_db, current_height, state_file, rotation_target if rotation_needed else None)
+                    last_topup_check = time.time()
                 
                 # Wait before next check
-                time.sleep(CHECK_INTERVAL)
+                time.sleep(ROTATION_CHECK_INTERVAL)
         
         except KeyboardInterrupt:
-            print(f"\n\n\033[93mMonitoring stopped by user (Ctrl+C)\033[0m")
+            print(f"\n\n\033[93m⏹ Monitoring stopped by user (Ctrl+C)\033[0m")
         except Exception as e:
             print(f"\n\033[91m✗ Unexpected error: {str(e)}\033[0m")
             import traceback
@@ -3274,6 +3423,674 @@ class ProvisionerManager:
         
         input("\nPress Enter to continue...")
         self._reinit_curses()
+    
+    def _load_or_create_stake_state(self, state_file):
+        """Load existing state or create new one"""
+        print(f"\033[94m[INIT] Loading stake state...\033[0m")
+        
+        if state_file.exists():
+            try:
+                with open(state_file, 'r') as f:
+                    stake_db = json.load(f)
+                print(f"\033[92m✓ Loaded existing state from {state_file}\033[0m")
+                print(f"\033[90m  Last update: {stake_db.get('timestamp', 'Unknown')}\033[0m")
+                return stake_db
+            except Exception as e:
+                print(f"\033[91m✗ Failed to load state: {e}\033[0m")
+                print(f"\033[93m  Creating new state...\033[0m")
+        
+        # Create new state
+        heights = []
+        log_files = ['/var/log/rusk-1.log', '/var/log/rusk-2.log', '/var/log/rusk-3.log']
+        for log_file in log_files:
+            height = self._get_block_height_from_log(log_file)
+            if height:
+                heights.append((log_file, height))
+        
+        if not heights:
+            print(f"\033[91m✗ Cannot get block height!\033[0m")
+            return None
+        
+        current_height = max(heights, key=lambda x: x[1])[1]
+        current_epoch = ((current_height - 1) // 2160) + 1
+        
+        stake_db = {
+            "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+            "current_block": current_height,
+            "current_epoch": current_epoch,
+            "provisioners": {}
+        }
+        
+        # Query all provisioners
+        stored_keys = self._decrypt_keys(self.encryption_password)
+        if not stored_keys:
+            print(f"\033[91m✗ No provisioners found!\033[0m")
+            return None
+        
+        sorted_provisioners = sorted(stored_keys.items(), key=lambda x: int(x[1].get('index', 0)))
+        
+        for prov_id, data in sorted_provisioners:
+            idx = int(data['index'])
+            if idx > 1:  # Skip fallback provisioner
+                continue
+            
+            address = data.get('address', 'N/A')
+            stake_info_command = f"sozu-beta3-rusk-wallet -w ~/sozu_provisioner -n testnet stake-info --profile-idx {idx}"
+            success, output = self.execute_wallet_command(stake_info_command)
+            
+            prov_entry = {
+                "index": idx,
+                "provisioner_id": prov_id,
+                "address": address,
+                "status": "unknown",
+                "eligible_stake": 0,
+                "slashed_stake": 0,
+                "stake_active_from_block": None,
+                "stake_active_from_epoch": None,
+                "epoch_transitions_seen": 0
+            }
+            
+            if success:
+                if "A stake does not exist" in output:
+                    prov_entry["status"] = "inactive"
+                elif "Eligible stake:" in output:
+                    eligible_match = re.search(r'Eligible stake:\s*(\d+(?:\.\d+)?)\s*DUSK', output)
+                    if eligible_match:
+                        prov_entry["eligible_stake"] = float(eligible_match.group(1))
+                    
+                    slashed_match = re.search(r'Reclaimable slashed stake:\s*(\d+(?:\.\d+)?)\s*DUSK', output)
+                    if slashed_match:
+                        prov_entry["slashed_stake"] = float(slashed_match.group(1))
+                    
+                    active_match = re.search(r'Stake active from block #(\d+) \(Epoch (\d+)\)', output)
+                    if active_match:
+                        stake_active_block = int(active_match.group(1))
+                        stake_active_epoch = int(active_match.group(2))
+                        prov_entry["stake_active_from_block"] = stake_active_block
+                        prov_entry["stake_active_from_epoch"] = stake_active_epoch
+                        
+                        blocks_until_active = stake_active_block - current_height
+                        
+                        if blocks_until_active >= 2160:
+                            prov_entry["status"] = "maturing"
+                            prov_entry["epoch_transitions_seen"] = 0
+                        elif blocks_until_active > 0:
+                            prov_entry["status"] = "maturing"
+                            prov_entry["epoch_transitions_seen"] = 1
+                        else:
+                            prov_entry["status"] = "active"
+                            blocks_since_active = current_height - stake_active_block
+                            prov_entry["epoch_transitions_seen"] = 2 + (blocks_since_active // 2160)
+            
+            stake_db["provisioners"][str(idx)] = prov_entry
+            print(f"\033[90m  idx {idx}: {prov_entry['status']} ({prov_entry['eligible_stake']:,.0f} DUSK, {prov_entry['epoch_transitions_seen']} transitions)\033[0m")
+        
+        # Save initial state
+        with open(state_file, 'w') as f:
+            json.dump(stake_db, f, indent=2)
+        
+        print(f"\033[92m✓ Created new state\033[0m")
+        return stake_db
+    
+    def _update_stake_state(self, state_file, current_height):
+        """Re-query and update stake state"""
+        print(f"\033[94m  [UPDATE] Re-querying stake info...\033[0m")
+        
+        current_epoch = ((current_height - 1) // 2160) + 1
+        stake_db = {
+            "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+            "current_block": current_height,
+            "current_epoch": current_epoch,
+            "provisioners": {}
+        }
+        
+        stored_keys = self._decrypt_keys(self.encryption_password)
+        sorted_provisioners = sorted(stored_keys.items(), key=lambda x: int(x[1].get('index', 0)))
+        
+        for prov_id, data in sorted_provisioners:
+            idx = int(data['index'])
+            if idx > 1:
+                continue
+            
+            address = data.get('address', 'N/A')
+            stake_info_command = f"sozu-beta3-rusk-wallet -w ~/sozu_provisioner -n testnet stake-info --profile-idx {idx}"
+            success, output = self.execute_wallet_command(stake_info_command)
+            
+            prov_entry = {
+                "index": idx,
+                "provisioner_id": prov_id,
+                "address": address,
+                "status": "unknown",
+                "eligible_stake": 0,
+                "slashed_stake": 0,
+                "stake_active_from_block": None,
+                "stake_active_from_epoch": None,
+                "epoch_transitions_seen": 0
+            }
+            
+            if success:
+                if "A stake does not exist" in output:
+                    prov_entry["status"] = "inactive"
+                elif "Eligible stake:" in output:
+                    eligible_match = re.search(r'Eligible stake:\s*(\d+(?:\.\d+)?)\s*DUSK', output)
+                    if eligible_match:
+                        prov_entry["eligible_stake"] = float(eligible_match.group(1))
+                    
+                    slashed_match = re.search(r'Reclaimable slashed stake:\s*(\d+(?:\.\d+)?)\s*DUSK', output)
+                    if slashed_match:
+                        prov_entry["slashed_stake"] = float(slashed_match.group(1))
+                    
+                    active_match = re.search(r'Stake active from block #(\d+) \(Epoch (\d+)\)', output)
+                    if active_match:
+                        stake_active_block = int(active_match.group(1))
+                        stake_active_epoch = int(active_match.group(2))
+                        prov_entry["stake_active_from_block"] = stake_active_block
+                        prov_entry["stake_active_from_epoch"] = stake_active_epoch
+                        
+                        blocks_until_active = stake_active_block - current_height
+                        
+                        if blocks_until_active >= 2160:
+                            prov_entry["status"] = "maturing"
+                            prov_entry["epoch_transitions_seen"] = 0
+                        elif blocks_until_active > 0:
+                            prov_entry["status"] = "maturing"
+                            prov_entry["epoch_transitions_seen"] = 1
+                        else:
+                            prov_entry["status"] = "active"
+                            blocks_since_active = current_height - stake_active_block
+                            prov_entry["epoch_transitions_seen"] = 2 + (blocks_since_active // 2160)
+            
+            stake_db["provisioners"][str(idx)] = prov_entry
+        
+        with open(state_file, 'w') as f:
+            json.dump(stake_db, f, indent=2)
+        
+        print(f"\033[92m  ✓ State updated\033[0m")
+        for idx_str, prov in stake_db["provisioners"].items():
+            print(f"\033[90m    idx {prov['index']}: {prov['status']} ({prov['eligible_stake']:,.0f} DUSK, {prov['epoch_transitions_seen']} trans)\033[0m")
+        
+        return stake_db
+    
+    def _check_rotation_trigger(self, stake_db, current_height, current_epoch, last_rotation_epoch):
+        """Check if rotation should be triggered"""
+        print(f"\033[90m  [CHECK] Rotation trigger...\033[0m", end='')
+        
+        # Skip if already rotated this epoch
+        if last_rotation_epoch == current_epoch:
+            print(f" ⏭ Already rotated this epoch")
+            return False, None
+        
+        rotation_trigger_blocks = self.config.get('rotation_trigger_blocks', 50)
+        
+        # Find active and maturing provisioners (ONLY idx 0 and 1)
+        active_prov = None
+        maturing_1trans_prov = None
+        
+        for idx_str, prov in stake_db["provisioners"].items():
+            # ONLY consider indices 0 and 1
+            if prov["index"] not in [0, 1]:
+                continue
+            
+            if prov["status"] == "active":
+                active_prov = prov
+            elif prov["status"] == "maturing" and prov["epoch_transitions_seen"] == 1:
+                maturing_1trans_prov = prov
+        
+        # Must have a maturing provisioner with 1 transition
+        if not maturing_1trans_prov:
+            print(f" ❌ No maturing prov with 1 transition (idx 0 or 1)")
+            return False, None
+        
+        # Check if we're within trigger window
+        rotation_block = maturing_1trans_prov["stake_active_from_block"] - rotation_trigger_blocks
+        
+        if current_height >= rotation_block:
+            print(f" ✅ TRIGGERED!")
+            print(f"\033[93m    Current: {current_height:,} | Trigger: {rotation_block:,} | Will be active: {maturing_1trans_prov['stake_active_from_block']:,}\033[0m")
+            return True, maturing_1trans_prov
+        
+        blocks_until_trigger = rotation_block - current_height
+        print(f" ⏳ {blocks_until_trigger} blocks until trigger")
+        return False, None
+    
+    def _execute_smart_rotation(self, stake_db, target_prov, current_height):
+        """Execute rotation: liquidate active, allocate 1000 back, top-up target"""
+        print(f"\n\033[1m\033[95m{'═' * 70}\033[0m")
+        print(f"\033[1m\033[95mEXECUTING SMART ROTATION\033[0m")
+        print(f"\033[1m\033[95m{'═' * 70}\033[0m\n")
+        
+        # Find active provisioner (ONLY idx 0 and 1)
+        active_prov = None
+        for idx_str, prov in stake_db["provisioners"].items():
+            # ONLY consider indices 0 and 1
+            if prov["index"] not in [0, 1]:
+                continue
+            
+            if prov["status"] == "active":
+                active_prov = prov
+                break
+        
+        if not active_prov:
+            print(f"\033[91m✗ No active provisioner found (idx 0 or 1)!\033[0m")
+            return False
+        
+        print(f"\033[93m[STEP 1] Liquidate & Terminate active provisioner\033[0m")
+        print(f"\033[90m  Index: {active_prov['index']}\033[0m")
+        print(f"\033[90m  Current stake: {active_prov['eligible_stake']:,.0f} DUSK\033[0m")
+        print(f"\033[90m  This will become available for allocation\033[0m\n")
+        
+        # Get provisioner keys
+        stored_keys = self._decrypt_keys(self.encryption_password)
+        active_prov_id = active_prov["provisioner_id"]
+        
+        # Execute liquidation
+        log_files = ['/var/log/rusk-1.log', '/var/log/rusk-2.log', '/var/log/rusk-3.log']
+        liquidate_success = self._automated_liquidate_and_terminate(active_prov, log_files)
+        
+        if not liquidate_success:
+            print(f"\033[91m✗ Liquidation failed!\033[0m")
+            return False
+        
+        print(f"\033[92m✓ Liquidation complete\033[0m\n")
+        
+        # Check available stake
+        print(f"\033[93m[STEP 2] Check available stake\033[0m")
+        available_stake = self._check_available_stake()
+        if available_stake is None:
+            print(f"\033[91m✗ Could not check available stake\033[0m")
+            return False
+        
+        print(f"\033[92m✓ Available: {available_stake:,.2f} DUSK\033[0m\n")
+        
+        # Allocate 1000 back to just-liquidated provisioner
+        print(f"\033[93m[STEP 3] Allocate 1,000 DUSK back to idx {active_prov['index']}\033[0m")
+        print(f"\033[90m  This starts maturing with 0 transitions\033[0m\n")
+        
+        if available_stake < 1000:
+            print(f"\033[91m✗ Insufficient stake ({available_stake:,.2f} < 1000)\033[0m")
+            return False
+        
+        small_stake_lux = 1000 * 1_000_000_000
+        provisioner_sk_old = stored_keys[active_prov_id]['secret_key']
+        
+        payload_cmd = f"""sozu-beta3-rusk-wallet -w ~/sozu_operator -n testnet calculate-payload-stake-activate \
+  --provisioner-sk {provisioner_sk_old} \
+  --amount {small_stake_lux} \
+  --network-id {self.config['network_id']}"""
+        
+        payload_result, payload_output = self.execute_wallet_command(payload_cmd)
+        if not payload_result:
+            print(f"\033[91m✗ Failed to calculate payload\033[0m")
+            return False
+        
+        payload_match = re.search(r'"([0-9a-fA-F]+)"', payload_output)
+        if not payload_match:
+            lines = [line.strip() for line in payload_output.split('\n') if line.strip()]
+            payload = lines[-1].strip().strip('"') if lines else None
+        else:
+            payload = payload_match.group(1)
+        
+        if not payload:
+            print(f"\033[91m✗ Could not extract payload\033[0m")
+            return False
+        
+        activate_cmd = f"""sozu-beta3-rusk-wallet -w ~/sozu_operator -n testnet contract-call \
+  --contract-id {self.config['contract_address']} \
+  --fn-name stake_activate \
+  --fn-args "{payload}" \
+  --gas-limit {self.config['gas_limit']}"""
+        
+        activate_result, _ = self.execute_wallet_command(activate_cmd)
+        if not activate_result:
+            print(f"\033[91m✗ Failed to allocate 1,000 DUSK\033[0m")
+            return False
+        
+        print(f"\033[92m✓ Allocated 1,000 DUSK to idx {active_prov['index']}\033[0m\n")
+        available_stake -= 1000
+        
+        # Top-up target provisioner
+        stake_limit = self.config.get('stake_limit', 1000000)
+        
+        # Calculate remaining capacity after allocating 1000 to the just-liquidated prov
+        # Total staked now = 1000 (just allocated) + target's current stake
+        total_after_1000 = 1000 + target_prov["eligible_stake"]
+        remaining_capacity = stake_limit - total_after_1000 - 1
+        
+        # We want to add as much as possible to reach stake_limit - 1001 total
+        target_total_stake = stake_limit - 1001  # 998,999 for 1M limit
+        current_target_stake = target_prov["eligible_stake"]
+        desired_to_add = target_total_stake - current_target_stake
+        
+        # But we're limited by both available stake AND remaining capacity
+        amount_to_add = min(int(available_stake - 1000), int(remaining_capacity), desired_to_add)
+        
+        print(f"\033[93m[STEP 4] Top-up target provisioner\033[0m")
+        print(f"\033[90m  Index: {target_prov['index']}\033[0m")
+        print(f"\033[90m  Current stake: {current_target_stake:,.0f} DUSK\033[0m")
+        print(f"\033[90m  Target total: {target_total_stake:,.0f} DUSK\033[0m")
+        print(f"\033[90m  Desired to add: {desired_to_add:,.0f} DUSK\033[0m")
+        print(f"\033[90m  Available (after 1000 allocation): {available_stake - 1000:,.2f} DUSK\033[0m")
+        print(f"\033[90m  Remaining capacity: {remaining_capacity:,.0f} DUSK\033[0m")
+        print(f"\033[90m  Will add: {amount_to_add:,.0f} DUSK\033[0m\n")
+        
+        if amount_to_add <= 0:
+            print(f"\033[92m✓ Target already has sufficient stake\033[0m")
+            return True
+        
+        amount_to_add_lux = amount_to_add * 1_000_000_000
+        target_prov_id = target_prov["provisioner_id"]
+        provisioner_sk_new = stored_keys[target_prov_id]['secret_key']
+        
+        payload_cmd = f"""sozu-beta3-rusk-wallet -w ~/sozu_operator -n testnet calculate-payload-stake-activate \
+  --provisioner-sk {provisioner_sk_new} \
+  --amount {amount_to_add_lux} \
+  --network-id {self.config['network_id']}"""
+        
+        payload_result, payload_output = self.execute_wallet_command(payload_cmd)
+        if not payload_result:
+            print(f"\033[91m✗ Failed to calculate payload\033[0m")
+            return False
+        
+        payload_match = re.search(r'"([0-9a-fA-F]+)"', payload_output)
+        if not payload_match:
+            lines = [line.strip() for line in payload_output.split('\n') if line.strip()]
+            payload = lines[-1].strip().strip('"') if lines else None
+        else:
+            payload = payload_match.group(1)
+        
+        if not payload:
+            print(f"\033[91m✗ Could not extract payload\033[0m")
+            return False
+        
+        activate_cmd = f"""sozu-beta3-rusk-wallet -w ~/sozu_operator -n testnet contract-call \
+  --contract-id {self.config['contract_address']} \
+  --fn-name stake_activate \
+  --fn-args "{payload}" \
+  --gas-limit {self.config['gas_limit']}"""
+        
+        activate_result, _ = self.execute_wallet_command(activate_cmd)
+        if not activate_result:
+            print(f"\033[91m✗ Failed to top-up\033[0m")
+            return False
+        
+        print(f"\033[92m✓ Added {amount_to_add:,.0f} DUSK to idx {target_prov['index']}\033[0m")
+        
+        print(f"\n\033[1m\033[92m{'═' * 70}\033[0m")
+        print(f"\033[1m\033[92m✓ ROTATION COMPLETE!\033[0m")
+        print(f"\033[1m\033[92m{'═' * 70}\033[0m\n")
+        
+        return True
+    
+    def _check_for_anomaly(self, stake_db, current_height):
+        """Detect anomalies like externally terminated provisioners"""
+        print(f"\033[90m  [ANOMALY] Checking for irregularities...\033[0m", end='')
+        
+        active_count = 0
+        inactive_count = 0
+        maturing_count = 0
+        
+        active_prov = None
+        inactive_prov = None
+        
+        for idx_str, prov in stake_db["provisioners"].items():
+            if prov["index"] not in [0, 1]:
+                continue
+            
+            if prov["status"] == "active":
+                active_count += 1
+                active_prov = prov
+            elif prov["status"] == "inactive":
+                inactive_count += 1
+                inactive_prov = prov
+            elif prov["status"] == "maturing":
+                maturing_count += 1
+        
+        # ANOMALY 1: Both provisioners inactive (active one was terminated)
+        if active_count == 0 and inactive_count == 2:
+            print(f" ⚠️ DETECTED!")
+            print(f"\n\033[1m\033[91m{'!' * 70}\033[0m")
+            print(f"\033[1m\033[91m⚠️ ANOMALY: Both provisioners are inactive!\033[0m")
+            print(f"\033[1m\033[91m{'!' * 70}\033[0m\n")
+            print(f"\033[93m  Active provisioner may have been externally terminated.\033[0m")
+            print(f"\033[93m  Starting recovery: Allocating to one provisioner...\033[0m\n")
+            
+            # Allocate to first inactive to restart rotation
+            available_stake = self._check_available_stake()
+            if available_stake and available_stake >= 1000:
+                can_allocate = min(int(available_stake), 1000)
+                print(f"\033[94m  [RECOVERY] Allocating {can_allocate:,.0f} DUSK to idx {inactive_prov['index']}...\033[0m")
+                success = self._execute_allocation(inactive_prov, can_allocate)
+                if success:
+                    print(f"\033[92m  ✅ Recovery allocation complete!\033[0m\n")
+                    return True
+            else:
+                print(f"\033[91m  ✗ Insufficient stake for recovery ({available_stake if available_stake else 0:,.2f} < 1000)\033[0m\n")
+            
+            return True
+        
+        # ANOMALY 2: One fully staked active, one completely inactive (rotation failed)
+        if active_count == 1 and inactive_count == 1 and active_prov and active_prov["eligible_stake"] > 900000:
+            print(f" ⚠️ DETECTED!")
+            print(f"\n\033[1m\033[93m{'!' * 70}\033[0m")
+            print(f"\033[1m\033[93m⚠️ WARNING: Rotation pattern broken!\033[0m")
+            print(f"\033[1m\033[93m{'!' * 70}\033[0m\n")
+            print(f"\033[93m  Only idx {active_prov['index']} is active with {active_prov['eligible_stake']:,.0f} DUSK.\033[0m")
+            print(f"\033[93m  Starting recovery: Allocating to idx {inactive_prov['index']}...\033[0m\n")
+            
+            # Allocate to get rotation started
+            available_stake = self._check_available_stake()
+            if available_stake and available_stake >= 1000:
+                stake_limit = self.config.get('stake_limit', 1000000)
+                total_staked = active_prov["eligible_stake"]
+                remaining_capacity = stake_limit - total_staked - 1
+                
+                can_allocate = min(int(available_stake), int(remaining_capacity), 1000)
+                
+                if can_allocate >= 1000:
+                    print(f"\033[94m  [RECOVERY] Allocating {can_allocate:,.0f} DUSK to idx {inactive_prov['index']}...\033[0m")
+                    success = self._execute_allocation(inactive_prov, can_allocate)
+                    if success:
+                        print(f"\033[92m  ✅ Recovery allocation complete! Rotation pattern restored.\033[0m\n")
+                        return True
+                else:
+                    print(f"\033[91m  ✗ Insufficient capacity for recovery (remaining: {remaining_capacity:,.0f})\033[0m\n")
+            else:
+                print(f"\033[91m  ✗ Insufficient stake for recovery ({available_stake if available_stake else 0:,.2f} < 1000)\033[0m\n")
+            
+            return True
+        
+        print(f" ✓ OK")
+        return False
+    
+    def _check_and_topup(self, stake_db, current_height, state_file, rotation_target=None):
+        """Check for top-up opportunities and execute if beneficial"""
+        print(f"\033[94m  [TOPUP] Checking opportunities...\033[0m")
+        
+        # PAUSE during rotation window to avoid conflicts
+        if rotation_target:
+            rotation_trigger_blocks = self.config.get('rotation_trigger_blocks', 50)
+            activation_block = rotation_target["stake_active_from_block"]
+            trigger_block = activation_block - rotation_trigger_blocks
+            blocks_until_trigger = trigger_block - current_height
+            
+            # If we're within the rotation window, skip top-up
+            if blocks_until_trigger <= rotation_trigger_blocks and blocks_until_trigger >= 0:
+                print(f"\033[93m    ⏸ Skipping top-up (in rotation window: {blocks_until_trigger} blocks until trigger)\033[0m")
+                return stake_db
+        
+        # Check available stake
+        available_stake = self._check_available_stake()
+        if available_stake is None or available_stake < 1000:
+            print(f"\033[90m    Available: {available_stake if available_stake else 0:,.2f} DUSK (< 1000, skip)\033[0m")
+            return stake_db
+        
+        print(f"\033[92m    Available in contract: {available_stake:,.2f} DUSK\033[0m")
+        
+        # Calculate TOTAL staked across ALL provisioners
+        total_staked = sum(prov["eligible_stake"] for prov in stake_db["provisioners"].values())
+        stake_limit = self.config.get('stake_limit', 1000000)
+        remaining_capacity = stake_limit - total_staked - 1  # -1 for safety
+        
+        print(f"\033[90m    Total staked across all provs: {total_staked:,.0f} DUSK\033[0m")
+        print(f"\033[90m    Stake limit: {stake_limit:,.0f} DUSK\033[0m")
+        print(f"\033[90m    Remaining capacity: {remaining_capacity:,.0f} DUSK\033[0m")
+        
+        if remaining_capacity < 1000:
+            print(f"\033[93m    ⚠ No capacity for allocation (remaining: {remaining_capacity:,.0f} DUSK)\033[0m")
+            return stake_db
+        
+        # Find maturing provisioner with 1 transition (ONLY idx 0 and 1)
+        maturing_prov = None
+        inactive_prov = None
+        
+        print(f"\033[90m    Checking provisioners (idx 0 and 1 only, idx 2 is fallback)...\033[0m")
+        
+        for idx_str, prov in stake_db["provisioners"].items():
+            # ONLY consider indices 0 and 1
+            if prov["index"] not in [0, 1]:
+                print(f"\033[90m      Skipping idx {prov['index']} (fallback only)\033[0m")
+                continue
+            
+            if prov["status"] == "maturing" and prov["epoch_transitions_seen"] == 1:
+                maturing_prov = prov
+                print(f"\033[90m      Found maturing idx {prov['index']} with 1 transition\033[0m")
+            elif prov["status"] == "inactive":
+                inactive_prov = prov
+                print(f"\033[90m      Found inactive idx {prov['index']}\033[0m")
+        
+        # Priority 1: Top-up maturing provisioner with 1 transition
+        if maturing_prov:
+            current_stake = maturing_prov["eligible_stake"]
+            # Target is the maximum we can allocate within the limit
+            max_target = stake_limit - 1001  # Reserve for other provisioners
+            
+            # But we're limited by remaining capacity
+            can_add = min(int(available_stake), int(remaining_capacity))
+            
+            if can_add >= 1000:
+                print(f"\033[93m    → Top-up maturing prov idx {maturing_prov['index']}\033[0m")
+                print(f"\033[90m      Current: {current_stake:,.0f} | Can add: {can_add:,.0f}\033[0m")
+                success = self._execute_topup(maturing_prov, can_add)
+                if success:
+                    # Update state immediately after successful top-up
+                    print(f"\033[94m      [UPDATE] Refreshing state after top-up...\033[0m")
+                    stake_db = self._update_stake_state(state_file, current_height)
+                return stake_db
+            else:
+                print(f"\033[90m    Maturing prov idx {maturing_prov['index']} exists but no capacity to top-up\033[0m")
+        
+        # Priority 2: Allocate to inactive provisioner (start maturing)
+        elif inactive_prov:
+            # Can only allocate what fits within remaining capacity
+            can_allocate = min(int(available_stake), int(remaining_capacity))
+            
+            if can_allocate >= 1000:
+                print(f"\033[93m    → Allocate to inactive prov idx {inactive_prov['index']} (start maturing!)\033[0m")
+                print(f"\033[90m      Amount: {can_allocate:,.0f} DUSK (limited by capacity)\033[0m")
+                success = self._execute_allocation(inactive_prov, can_allocate)
+                if success:
+                    # Update state immediately after successful allocation
+                    print(f"\033[94m      [UPDATE] Refreshing state after allocation...\033[0m")
+                    stake_db = self._update_stake_state(state_file, current_height)
+                return stake_db
+            else:
+                print(f"\033[90m    Inactive prov exists but insufficient capacity ({can_allocate:,.0f} < 1000)\033[0m")
+        
+        else:
+            print(f"\033[90m    No allocation opportunities (checked idx 0 and 1 only)\033[0m")
+        
+        return stake_db
+    
+    def _execute_topup(self, prov, amount):
+        """Execute top-up for a provisioner"""
+        print(f"\033[94m      [EXEC] Topping up {amount:,.0f} DUSK...\033[0m")
+        
+        stored_keys = self._decrypt_keys(self.encryption_password)
+        prov_id = prov["provisioner_id"]
+        provisioner_sk = stored_keys[prov_id]['secret_key']
+        
+        amount_lux = amount * 1_000_000_000
+        
+        payload_cmd = f"""sozu-beta3-rusk-wallet -w ~/sozu_operator -n testnet calculate-payload-stake-activate \
+  --provisioner-sk {provisioner_sk} \
+  --amount {amount_lux} \
+  --network-id {self.config['network_id']}"""
+        
+        payload_result, payload_output = self.execute_wallet_command(payload_cmd)
+        if not payload_result:
+            print(f"\033[91m      ✗ Payload failed\033[0m")
+            return False
+        
+        payload_match = re.search(r'"([0-9a-fA-F]+)"', payload_output)
+        if not payload_match:
+            lines = [line.strip() for line in payload_output.split('\n') if line.strip()]
+            payload = lines[-1].strip().strip('"') if lines else None
+        else:
+            payload = payload_match.group(1)
+        
+        if not payload:
+            print(f"\033[91m      ✗ No payload\033[0m")
+            return False
+        
+        activate_cmd = f"""sozu-beta3-rusk-wallet -w ~/sozu_operator -n testnet contract-call \
+  --contract-id {self.config['contract_address']} \
+  --fn-name stake_activate \
+  --fn-args "{payload}" \
+  --gas-limit {self.config['gas_limit']}"""
+        
+        activate_result, _ = self.execute_wallet_command(activate_cmd)
+        if activate_result:
+            print(f"\033[92m      ✓ Top-up complete!\033[0m")
+            return True
+        else:
+            print(f"\033[91m      ✗ Activation failed\033[0m")
+            return False
+    
+    def _execute_allocation(self, prov, amount):
+        """Execute initial allocation to inactive provisioner"""
+        print(f"\033[94m      [EXEC] Allocating {amount:,.0f} DUSK...\033[0m")
+        
+        stored_keys = self._decrypt_keys(self.encryption_password)
+        prov_id = prov["provisioner_id"]
+        provisioner_sk = stored_keys[prov_id]['secret_key']
+        
+        amount_lux = amount * 1_000_000_000
+        
+        payload_cmd = f"""sozu-beta3-rusk-wallet -w ~/sozu_operator -n testnet calculate-payload-stake-activate \
+  --provisioner-sk {provisioner_sk} \
+  --amount {amount_lux} \
+  --network-id {self.config['network_id']}"""
+        
+        payload_result, payload_output = self.execute_wallet_command(payload_cmd)
+        if not payload_result:
+            print(f"\033[91m      ✗ Payload failed\033[0m")
+            return False
+        
+        payload_match = re.search(r'"([0-9a-fA-F]+)"', payload_output)
+        if not payload_match:
+            lines = [line.strip() for line in payload_output.split('\n') if line.strip()]
+            payload = lines[-1].strip().strip('"') if lines else None
+        else:
+            payload = payload_match.group(1)
+        
+        if not payload:
+            print(f"\033[91m      ✗ No payload\033[0m")
+            return False
+        
+        activate_cmd = f"""sozu-beta3-rusk-wallet -w ~/sozu_operator -n testnet contract-call \
+  --contract-id {self.config['contract_address']} \
+  --fn-name stake_activate \
+  --fn-args "{payload}" \
+  --gas-limit {self.config['gas_limit']}"""
+        
+        activate_result, _ = self.execute_wallet_command(activate_cmd)
+        if activate_result:
+            print(f"\033[92m      ✓ Allocation complete! Provisioner now maturing.\033[0m")
+            return True
+        else:
+            print(f"\033[91m      ✗ Activation failed\033[0m")
+            return False
+
     
     def show_configuration(self):
         """Option 8: Configuration"""
@@ -3284,6 +4101,8 @@ class ProvisionerManager:
             "Edit Operator Address",
             "Edit Stake Limit",
             "Edit Rotation Trigger Blocks",
+            "Edit Rotation Check Interval",
+            "Edit Top-up Check Interval",
             "Set/Update Wallet Password",
             "Reset to Defaults",
             "Return to Main Menu"
@@ -3324,6 +4143,10 @@ class ProvisionerManager:
             y_pos += 1
             self.stdscr.addstr(y_pos, 2, f"Rotation Trigger:   {self.config.get('rotation_trigger_blocks', 50)} blocks")
             y_pos += 1
+            self.stdscr.addstr(y_pos, 2, f"Rotation Check:     {self.config.get('rotation_check_interval', 10)} seconds")
+            y_pos += 1
+            self.stdscr.addstr(y_pos, 2, f"Top-up Interval:    {self.config.get('topup_check_interval', 30)} seconds")
+            y_pos += 1
             self.stdscr.attron(curses.color_pair(config_color))
             self.stdscr.addstr(y_pos, 2, f"Wallet Password:    {wallet_password_status}")
             self.stdscr.attroff(curses.color_pair(config_color))
@@ -3353,7 +4176,7 @@ class ProvisionerManager:
             elif key == curses.KEY_DOWN:
                 selected_idx = (selected_idx + 1) % len(config_menu_items)
             elif key in [curses.KEY_ENTER, ord('\n'), ord('\r')]:
-                if selected_idx == 8:  # Return to Main Menu
+                if selected_idx == 10:  # Return to Main Menu
                     break
                 else:
                     self._handle_config_option(selected_idx + 1)
@@ -3436,7 +4259,35 @@ class ProvisionerManager:
                 print(f"\033[91m✗ Invalid value. Must be a number.\033[0m")
             input("\nPress Enter to continue...")
         
-        elif option == 7:  # Set/Update Wallet Password
+        elif option == 7:  # Edit Rotation Check Interval
+            new_value = input(f"\n\033[96mEnter Rotation Check Interval (seconds, current: {self.config.get('rotation_check_interval', 10)}): \033[0m").strip()
+            try:
+                interval = int(new_value)
+                if interval <= 0:
+                    print(f"\033[91m✗ Interval must be greater than 0 seconds\033[0m")
+                else:
+                    self.config['rotation_check_interval'] = interval
+                    self._save_config()
+                    print(f"\033[92m✓ Rotation Check Interval updated to {self.config['rotation_check_interval']} seconds\033[0m")
+            except ValueError:
+                print(f"\033[91m✗ Invalid value. Must be a number.\033[0m")
+            input("\nPress Enter to continue...")
+        
+        elif option == 8:  # Edit Top-up Check Interval
+            new_value = input(f"\n\033[96mEnter Top-up Check Interval (seconds, current: {self.config.get('topup_check_interval', 30)}): \033[0m").strip()
+            try:
+                interval = int(new_value)
+                if interval <= 0:
+                    print(f"\033[91m✗ Interval must be greater than 0 seconds\033[0m")
+                else:
+                    self.config['topup_check_interval'] = interval
+                    self._save_config()
+                    print(f"\033[92m✓ Top-up Check Interval updated to {self.config['topup_check_interval']} seconds\033[0m")
+            except ValueError:
+                print(f"\033[91m✗ Invalid value. Must be a number.\033[0m")
+            input("\nPress Enter to continue...")
+        
+        elif option == 9:  # Set/Update Wallet Password
             print(f"\n\033[1m\033[96mSet/Update Wallet Password\033[0m")
             print(f"\033[94m{'─' * 70}\033[0m\n")
             print(f"\033[93mThis password will be encrypted and stored in config.\033[0m")
@@ -3482,7 +4333,7 @@ class ProvisionerManager:
                 print(f"\033[91m✗ Failed to encrypt password: {str(e)}\033[0m")
             input("\nPress Enter to continue...")
         
-        elif option == 8:  # Reset to Defaults
+        elif option == 10:  # Reset to Defaults
             confirm = input(f"\n\033[93mReset to default testnet values? (yes/no): \033[0m").strip().lower()
             if confirm in ['yes', 'y']:
                 self.config['network_id'] = 2
@@ -3491,6 +4342,8 @@ class ProvisionerManager:
                 self.config['operator_address'] = ""
                 self.config['stake_limit'] = 1000000
                 self.config['rotation_trigger_blocks'] = 50
+                self.config['rotation_check_interval'] = 10
+                self.config['topup_check_interval'] = 30
                 # Don't reset wallet password
                 self._save_config()
                 print(f"\033[92m✓ Configuration reset to defaults (wallet password preserved)\033[0m")
