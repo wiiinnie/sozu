@@ -1,11 +1,32 @@
 #!/usr/bin/env python3
 """
-Provisioner Management CLI Tool - Version 2.1.1
+Provisioner Management CLI Tool - Version 2.1.4
 A command-line interface for managing provisioners with arrow key navigation.
 
-Version: 2.1.1
+Version: 2.1.4
 Release Date: 2026-02-11
 Author: Dusk Network Infrastructure Team
+
+New in v2.1.4:
+- FIX: Reverted slashed stake limit back to 2% (not 10%)
+  - For 1M limit: max 20K slashed
+  - User confirmed 2% is correct
+
+New in v2.1.3:
+- FIX: Bootstrap Stage 2 reverted to just wait (no allocations in rotation window)
+  - Top-up check handles allocations after epoch transition
+  - Cleaner separation of concerns
+- FIX: Slashed stake limit changed from 2% to 10% of stake_limit
+  - For 1M limit: max 100K slashed (was 20K)
+  - Allows more aggressive top-ups of active nodes when needed
+
+New in v2.1.2:
+- FIX: Bootstrap Stage 2 now performs allocations during rotation window
+  - Tops up idx 0 to 999K (slash-free in initial stake phase)
+  - Allocates 1K to idx 1 (initial stake)
+  - After epoch transition: idx 0 maturing (999K), idx 1 initial (1K)
+- IMPROVEMENT: Bootstrap Stage 2 waits for rotation window before acting
+- IMPROVEMENT: Clearer output showing rotation window detection
 
 New in v2.1.1:
 - CRITICAL FIX: Rotation logic now allocates to killed node (not "other" node)
@@ -4465,7 +4486,7 @@ class ProvisionerManager:
             print(f"\033[1m\033[96m🔧 BOOTSTRAP MODE: Node 0 allocated, waiting for next epoch\033[0m")
             print(f"\033[1m\033[96m{'=' * 70}\033[0m\n")
             print(f"\033[93m  Node 0: {inactive[0]['epoch_transitions_seen']} transitions\033[0m")
-            print(f"\033[93m  Will allocate to Node 1 in next epoch to avoid conflict.\033[0m\n")
+            print(f"\033[93m  Will wait for epoch transition, then top-up check handles allocations.\033[0m\n")
             return False  # Wait for next epoch
         
         # BOOTSTRAP 3: Node 0 maturing (1 trans), allocate to node 1
@@ -5422,7 +5443,7 @@ class ProvisionerManager:
                     url = f"https://api.telegram.org/bot{telegram_config['bot_token']}/sendMessage"
                     message = f"""✅ *Test Message*
 
-This is a test from Provisioner Manager v2.1.1
+This is a test from Provisioner Manager v2.1.4
 
 If you received this, Telegram is working correctly!
 
@@ -5543,7 +5564,7 @@ if __name__ == "__main__":
                     
                     message = f"""✅ *Provisioner Manager Started*
 
-Version: 2.1.1
+Version: 2.1.4
 System: 2-Node Rotation (idx 0 ↔ idx 1)
 Telegram: Connected
 
