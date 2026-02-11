@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """
-Provisioner Management CLI Tool - Version 2.1.0
+Provisioner Management CLI Tool - Version 2.1.1
 A command-line interface for managing provisioners with arrow key navigation.
 
-Version: 2.1.0
+Version: 2.1.1
 Release Date: 2026-02-11
 Author: Dusk Network Infrastructure Team
+
+New in v2.1.1:
+- CRITICAL FIX: Rotation logic now allocates to killed node (not "other" node)
+  - Bug: Was allocating 1K to idx 0 when killing idx 1
+  - Fix: Now allocates 1K to killed node (correct 2-node ping-pong)
+  - Result: After rotation you get active (999K) + maturing (1K) as intended
+- IMPROVEMENT: Clearer debug output showing which node is being killed
 
 New in v2.1.0:
 - FEATURE: Telegram configuration menu in Configuration section
@@ -4244,38 +4251,22 @@ class ProvisionerManager:
         # Normal rotation - active node exists
         active_prov = active[0]
         
-        # 2-NODE PING-PONG: Allocate to the OTHER node (0↔1)
-        # If active is idx 0, allocate to idx 1
-        # If active is idx 1, allocate to idx 0
-        # idx 2 stays at 0 DUSK (standby only)
-        current_active_idx = active_prov['index']
-        if current_active_idx == 0:
-            next_index = 1
-        elif current_active_idx == 1:
-            next_index = 0
-        else:
-            # Shouldn't happen in 2-node system, but handle it
-            print(f"\033[91m✗ Active node is idx {current_active_idx} - expected 0 or 1!\033[0m")
-            print(f"\033[93m   Defaulting to idx 0\033[0m")
-            next_index = 0
+        # 2-NODE PING-PONG LOGIC:
+        # We're killing the active node and allocating 1K back to it (for next cycle)
+        # Then we top up the maturing node so when it becomes active, it has 999K
         
-        print(f"\033[96m[2-NODE] Ping-pong: idx {current_active_idx} → idx {next_index}\033[0m\n")
+        # The killed node is the current active node
+        killed_node_idx = active_prov['index']
         
-        # Get the next node (for re-allocation)
-        next_node = None
-        for idx_str, prov in stake_db["provisioners"].items():
-            if prov["index"] == next_index:
-                next_node = prov
-                break
+        print(f"\033[96m[2-NODE] Rotation: killing idx {killed_node_idx}, will allocate back to it for next cycle\033[0m\n")
         
-        if not next_node:
-            print(f"\033[91m✗ Could not find node idx {next_index}!\033[0m")
-            return False
+        # Get the killed node (for re-allocation)
+        killed_node = active_prov  # It's the same node we're killing
         
         print(f"\033[93m[STEP 1] Liquidate & Terminate active provisioner\033[0m")
-        print(f"\033[90m  Killing: idx {active_prov['index']}\033[0m")
+        print(f"\033[90m  Killing: idx {killed_node_idx}\033[0m")
         print(f"\033[90m  Current stake: {active_prov['eligible_stake']:,.0f} DUSK\033[0m")
-        print(f"\033[90m  Will re-allocate 1K to idx {next_index} after kill\033[0m\n")
+        print(f"\033[90m  Will re-allocate 1K back to idx {killed_node_idx} after kill\033[0m\n")
         
         # Get provisioner keys
         stored_keys = self._decrypt_keys(self.encryption_password)
@@ -4299,20 +4290,20 @@ class ProvisionerManager:
         
         print(f"\033[92m✓ Available: {available_stake:,.2f} DUSK\033[0m\n")
         
-        # Allocate 1000 to killed node (rebuilds pipeline)
-        print(f"\033[93m[STEP 3] Allocate 1,000 DUSK back to killed node (idx {next_index})\033[0m")
-        print(f"\033[90m  This restarts the pipeline for next rotation\033[0m\n")
+        # Allocate 1000 DUSK to the killed node (rebuilds pipeline for next rotation)
+        print(f"\033[93m[STEP 3] Allocate 1,000 DUSK to killed node (idx {killed_node_idx})\033[0m")
+        print(f"\033[90m  This node will mature and become active in future rotation\033[0m\n")
         
         if available_stake < 1000:
             print(f"\033[91m✗ Insufficient stake ({available_stake:,.2f} < 1000)\033[0m")
             return False
         
         small_stake_lux = 1000 * 1_000_000_000
-        next_prov_id = next_node["provisioner_id"]
-        provisioner_sk_next = stored_keys[next_prov_id]['secret_key']
+        killed_prov_id = killed_node["provisioner_id"]
+        provisioner_sk_killed = stored_keys[killed_prov_id]['secret_key']
         
         payload_cmd = f"""sozu-beta3-rusk-wallet -w ~/sozu_operator -n testnet calculate-payload-stake-activate \
-  --provisioner-sk {provisioner_sk_next} \
+  --provisioner-sk {provisioner_sk_killed} \
   --amount {small_stake_lux} \
   --network-id {self.config['network_id']}"""
         
@@ -4343,7 +4334,7 @@ class ProvisionerManager:
             print(f"\033[91m✗ Failed to allocate 1,000 DUSK\033[0m")
             return False
         
-        print(f"\033[92m✓ Allocated 1,000 DUSK to idx {next_index}\033[0m\n")
+        print(f"\033[92m✓ Allocated 1,000 DUSK to idx {killed_node_idx}\033[0m\n")
         available_stake -= 1000
         
         # Top-up target provisioner
@@ -5431,7 +5422,7 @@ class ProvisionerManager:
                     url = f"https://api.telegram.org/bot{telegram_config['bot_token']}/sendMessage"
                     message = f"""✅ *Test Message*
 
-This is a test from Provisioner Manager v2.1.0
+This is a test from Provisioner Manager v2.1.1
 
 If you received this, Telegram is working correctly!
 
@@ -5552,7 +5543,7 @@ if __name__ == "__main__":
                     
                     message = f"""✅ *Provisioner Manager Started*
 
-Version: 2.1.0
+Version: 2.1.1
 System: 2-Node Rotation (idx 0 ↔ idx 1)
 Telegram: Connected
 
