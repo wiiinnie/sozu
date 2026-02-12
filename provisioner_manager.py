@@ -1,11 +1,31 @@
 #!/usr/bin/env python3
 """
-Provisioner Management CLI Tool - Version 2.1.4
+Provisioner Management CLI Tool - Version 2.1.6
 A command-line interface for managing provisioners with arrow key navigation.
 
-Version: 2.1.4
-Release Date: 2026-02-11
+Version: 2.1.6
+Release Date: 2026-02-12
 Author: Dusk Network Infrastructure Team
+
+New in v2.1.6:
+- FIX: Epoch transition Telegram notification now shows correct pipeline counts
+  - Issue: Blockchain RPC takes a moment to update transition counts after epoch boundary
+  - Was querying immediately after epoch detection → got stale counts (idx 0 showed 0 trans)
+  - Now waits for NEXT regular state update → blockchain has updated (idx 0 shows 1 trans)
+  - Telegram sent after wallet query confirms blockchain has latest transition counts
+  - Pipeline counts (Active/Maturing/Inactive) are now 100% accurate
+- FIX: Configuration menu "Return to Main Menu" now works correctly
+  - Was checking wrong index (10 instead of 11)
+- FIX: Configuration menu "Reset to Defaults" now works correctly
+  - Now properly returns to config menu after reset
+  - Config changes are applied and visible immediately
+
+New in v2.1.5:
+- FIX: Telegram "Rotation Complete" now shows correct stake amount
+  - Was showing pre-rotation stake (1K) instead of post-rotation (999K)
+  - Now fetches updated provisioner state after rotation completes
+- FIX: Stake formatting always shows whole numbers (no decimals)
+  - Changed {stake:,} to {int(stake):,} to ensure integer display
 
 New in v2.1.4:
 - FIX: Reverted slashed stake limit back to 2% (not 10%)
@@ -327,7 +347,7 @@ Time: {datetime.now().strftime('%H:%M:%S')}"""
             message = f"""✅ *Rotation Complete*
 
 New active: idx {new_active_idx}
-Stake: {stake:,} DUSK
+Stake: {int(stake):,} DUSK
 
 Time: {datetime.now().strftime('%H:%M:%S')}"""
         else:
@@ -3651,6 +3671,7 @@ class ProvisionerManager:
         transition_log_file = None
         transition_blocks_logged = 0
         last_logged_epoch = None
+        pending_epoch_transition_telegram = None  # (epoch, height) to send after next state update
         
         # Load or create initial state
         print(f"\033[1m\033[96m{'─' * 70}\033[0m")
@@ -3787,6 +3808,15 @@ class ProvisionerManager:
                 stake_db = self._update_stake_state(state_file, current_height)
                 log_print(f" ✓")
                 
+                # Send epoch transition Telegram notification NOW (after wallet query with correct counts)
+                if pending_epoch_transition_telegram is not None:
+                    epoch_num, height_num = pending_epoch_transition_telegram
+                    if self.telegram:
+                        log_print(f"\033[90m  [TELEGRAM] Sending epoch transition notification...\033[0m", end='')
+                        self.telegram.send_epoch_transition(epoch_num, height_num, stake_db["provisioners"])
+                        log_print(f" ✓")
+                    pending_epoch_transition_telegram = None  # Clear flag
+                
                 # TRANSITION LOGGER: Buffer current state for transition debugging
                 log_entry = {
                     'timestamp': timestamp,
@@ -3809,9 +3839,8 @@ class ProvisionerManager:
                     # EPOCH TRANSITION DETECTED!
                     log_print(f"\033[93m  [TRANSITION LOG] Epoch {last_logged_epoch} → {current_epoch} detected!\033[0m")
                     
-                    # Telegram notification
-                    if self.telegram:
-                        self.telegram.send_epoch_transition(current_epoch, current_height, stake_db["provisioners"])
+                    # Set flag to send Telegram AFTER next wallet query (when state is fully updated)
+                    pending_epoch_transition_telegram = (current_epoch, current_height)
                     
                     # Create transition log file
                     log_filename = f"transition_epoch_{last_logged_epoch}_to_{current_epoch}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
@@ -3912,13 +3941,28 @@ class ProvisionerManager:
                         stake_db = self._update_stake_state(state_file, current_height)
                         log_print(f"\n\033[92m✓ Rotation complete! State updated.\033[0m\n")
                         
-                        # Telegram notification - rotation complete
+                        # Telegram notification - rotation complete (use UPDATED stake!)
                         if self.telegram and rotation_target:
-                            self.telegram.send_rotation_complete(
-                                rotation_target['index'],
-                                rotation_target.get('eligible_stake', 0),
-                                success=True
-                            )
+                            # Get the updated provisioner state after rotation
+                            updated_prov = None
+                            for prov_id, prov in stake_db["provisioners"].items():
+                                if prov["index"] == rotation_target['index']:
+                                    updated_prov = prov
+                                    break
+                            
+                            if updated_prov:
+                                self.telegram.send_rotation_complete(
+                                    updated_prov['index'],
+                                    updated_prov.get('eligible_stake', 0),  # Now shows correct 999K!
+                                    success=True
+                                )
+                            else:
+                                # Fallback to old value if we can't find updated prov
+                                self.telegram.send_rotation_complete(
+                                    rotation_target['index'],
+                                    rotation_target.get('eligible_stake', 0),
+                                    success=True
+                                )
                         
                         # Log rotation result
                         if transition_logging_active and transition_log_file:
@@ -5154,7 +5198,7 @@ class ProvisionerManager:
             elif key == curses.KEY_DOWN:
                 selected_idx = (selected_idx + 1) % len(config_menu_items)
             elif key in [curses.KEY_ENTER, ord('\n'), ord('\r')]:
-                if selected_idx == 10:  # Return to Main Menu
+                if selected_idx == 11:  # Return to Main Menu (index 11, last item)
                     break
                 else:
                     self._handle_config_option(selected_idx + 1)
@@ -5332,7 +5376,7 @@ class ProvisionerManager:
                 print(f"\033[93mReset cancelled\033[0m")
             input("\nPress Enter to continue...")
         
-        # Reinitialize curses
+        # Reinitialize curses after any option
         self._reinit_curses()
     
     def _configure_telegram(self):
@@ -5443,7 +5487,7 @@ class ProvisionerManager:
                     url = f"https://api.telegram.org/bot{telegram_config['bot_token']}/sendMessage"
                     message = f"""✅ *Test Message*
 
-This is a test from Provisioner Manager v2.1.4
+This is a test from Provisioner Manager v2.1.6
 
 If you received this, Telegram is working correctly!
 
@@ -5564,7 +5608,7 @@ if __name__ == "__main__":
                     
                     message = f"""✅ *Provisioner Manager Started*
 
-Version: 2.1.4
+Version: 2.1.6
 System: 2-Node Rotation (idx 0 ↔ idx 1)
 Telegram: Connected
 
