@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """
-Provisioner Management CLI Tool - Version 2.1.4
+Provisioner Management CLI Tool - Version 2.1.5
 A command-line interface for managing provisioners with arrow key navigation.
 
-Version: 2.1.4
-Release Date: 2026-02-11
+Version: 2.1.5
+Release Date: 2026-02-12
 Author: Dusk Network Infrastructure Team
+
+New in v2.1.5:
+- FIX: Telegram "Rotation Complete" now shows correct stake amount
+  - Was showing pre-rotation stake (1K) instead of post-rotation (999K)
+  - Now fetches updated provisioner state after rotation completes
+- FIX: Stake formatting always shows whole numbers (no decimals)
+  - Changed {stake:,} to {int(stake):,} to ensure integer display
 
 New in v2.1.4:
 - FIX: Reverted slashed stake limit back to 2% (not 10%)
@@ -327,7 +334,7 @@ Time: {datetime.now().strftime('%H:%M:%S')}"""
             message = f"""✅ *Rotation Complete*
 
 New active: idx {new_active_idx}
-Stake: {stake:,} DUSK
+Stake: {int(stake):,} DUSK
 
 Time: {datetime.now().strftime('%H:%M:%S')}"""
         else:
@@ -3912,13 +3919,28 @@ class ProvisionerManager:
                         stake_db = self._update_stake_state(state_file, current_height)
                         log_print(f"\n\033[92m✓ Rotation complete! State updated.\033[0m\n")
                         
-                        # Telegram notification - rotation complete
+                        # Telegram notification - rotation complete (use UPDATED stake!)
                         if self.telegram and rotation_target:
-                            self.telegram.send_rotation_complete(
-                                rotation_target['index'],
-                                rotation_target.get('eligible_stake', 0),
-                                success=True
-                            )
+                            # Get the updated provisioner state after rotation
+                            updated_prov = None
+                            for prov_id, prov in stake_db["provisioners"].items():
+                                if prov["index"] == rotation_target['index']:
+                                    updated_prov = prov
+                                    break
+                            
+                            if updated_prov:
+                                self.telegram.send_rotation_complete(
+                                    updated_prov['index'],
+                                    updated_prov.get('eligible_stake', 0),  # Now shows correct 999K!
+                                    success=True
+                                )
+                            else:
+                                # Fallback to old value if we can't find updated prov
+                                self.telegram.send_rotation_complete(
+                                    rotation_target['index'],
+                                    rotation_target.get('eligible_stake', 0),
+                                    success=True
+                                )
                         
                         # Log rotation result
                         if transition_logging_active and transition_log_file:
@@ -5443,7 +5465,7 @@ class ProvisionerManager:
                     url = f"https://api.telegram.org/bot{telegram_config['bot_token']}/sendMessage"
                     message = f"""✅ *Test Message*
 
-This is a test from Provisioner Manager v2.1.4
+This is a test from Provisioner Manager v2.1.5
 
 If you received this, Telegram is working correctly!
 
@@ -5564,7 +5586,7 @@ if __name__ == "__main__":
                     
                     message = f"""✅ *Provisioner Manager Started*
 
-Version: 2.1.4
+Version: 2.1.5
 System: 2-Node Rotation (idx 0 ↔ idx 1)
 Telegram: Connected
 
