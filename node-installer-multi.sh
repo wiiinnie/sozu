@@ -2,40 +2,40 @@
 set -e
 
 #############################################
-# Multi-Instance Dusk Node Installer
-# Modified version to support multiple node instances on the same server
+# Multi-Instance Dusk Node Installer (Official Wrapper)
+# Uses the official Dusk installer and adapts for multiple instances
 #############################################
+
+# Color codes
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
 
 # Default values
 NETWORK="mainnet"
 INSTANCE=1
-FEATURE=""
-ARCH=$(uname -m)
-KADCAST_BASE_PORT=9000
-
-# Color codes for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+FEATURE="default"
 
 # Help message
 show_help() {
     cat << EOF
-Multi-Instance Dusk Node Installer
+Multi-Instance Dusk Node Installer (Official Wrapper)
+
+This script uses the official Dusk installer and adapts it for multi-instance deployment.
 
 Usage: $0 [OPTIONS]
 
 OPTIONS:
     --instance N           Instance number (default: 1)
-                          Creates installation in /opt/dusk{N}
-                          Uses Kadcast port 9000+N (e.g., 9001, 9002, 9003...)
+                          Instance 1 uses port 9001, Instance 2 uses 9002, etc.
     
     --network NETWORK      Network to install (default: mainnet)
                           Options: mainnet, testnet, devnet
     
-    --feature FEATURE      Optional feature flag
-                          Options: archive, prover
+    --feature FEATURE      Optional feature (default: default)
+                          Options: default, archive
     
     -h, --help            Show this help message
 
@@ -45,23 +45,12 @@ EXAMPLES:
     
     # Install second instance on mainnet
     sudo bash $0 --instance 2 --network mainnet
-    
-    # Install third instance with archive feature
-    sudo bash $0 --instance 3 --feature archive
-
-NOTES:
-    - Each instance gets a unique installation directory: /opt/dusk{N}
-    - Kadcast ports: Instance 1 uses 9001, Instance 2 uses 9002, etc.
-    - Standard ports (9000/8080) remain free for regular installations
-    - HTTP is disabled by default (listen = false)
-    - Service name will be: rusk-{N}
-    - Log files: /var/log/rusk-{N}.log
 
 EOF
     exit 0
 }
 
-# Parse command line arguments
+# Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
         --instance)
@@ -86,36 +75,29 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Validate instance number
+# Validate
 if ! [[ "$INSTANCE" =~ ^[0-9]+$ ]] || [ "$INSTANCE" -lt 1 ]; then
     echo -e "${RED}Error: Instance must be a positive integer${NC}"
     exit 1
 fi
 
-# Validate network
 if [[ ! "$NETWORK" =~ ^(mainnet|testnet|devnet)$ ]]; then
     echo -e "${RED}Error: Network must be mainnet, testnet, or devnet${NC}"
     exit 1
 fi
 
-# Calculate ports (starts from 9001 for instance 1, keeping 9000/8080 free for standard installation)
-KADCAST_PORT=$((KADCAST_BASE_PORT + INSTANCE))
-HTTP_PORT=$((8080 + INSTANCE))
-
-# Set paths based on instance
-DUSK_ROOT="/opt/dusk${INSTANCE}"
-SERVICE_NAME="rusk-${INSTANCE}"
-LOG_FILE="/var/log/rusk-${INSTANCE}.log"
-LOG_FILE_RECOVERY="/var/log/rusk-${INSTANCE}-recovery.log"
-
-# Check if running as root
+# Check root
 if [ "$EUID" -ne 0 ]; then 
     echo -e "${RED}Error: This script must be run as root (use sudo)${NC}"
     exit 1
 fi
 
-# Get current user (the one who invoked sudo)
-CURRENT_USER="${SUDO_USER:-$USER}"
+# Calculate ports
+KADCAST_PORT=$((9000 + INSTANCE))
+HTTP_PORT=$((8080 + INSTANCE))
+DUSK_ROOT="/opt/dusk${INSTANCE}"
+SERVICE_NAME="rusk-${INSTANCE}"
+LOG_FILE="/var/log/rusk-${INSTANCE}.log"
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}Multi-Instance Dusk Node Installer${NC}"
@@ -123,28 +105,16 @@ echo -e "${GREEN}========================================${NC}"
 echo ""
 echo -e "Instance Number:    ${YELLOW}${INSTANCE}${NC}"
 echo -e "Network:            ${YELLOW}${NETWORK}${NC}"
-echo -e "Installation Path:  ${YELLOW}${DUSK_ROOT}${NC}"
+echo -e "Feature:            ${YELLOW}${FEATURE}${NC}"
 echo -e "Kadcast Port:       ${YELLOW}${KADCAST_PORT}/udp${NC}"
-echo -e "HTTP Status:        ${YELLOW}Disabled${NC}"
+echo -e "HTTP Port:          ${YELLOW}${HTTP_PORT} (localhost only)${NC}"
+echo -e "Installation Path:  ${YELLOW}${DUSK_ROOT}${NC}"
 echo -e "Service Name:       ${YELLOW}${SERVICE_NAME}${NC}"
-echo -e "Log File:           ${YELLOW}${LOG_FILE}${NC}"
-if [ -n "$FEATURE" ]; then
-    echo -e "Feature:            ${YELLOW}${FEATURE}${NC}"
-fi
 echo ""
-echo -e "${YELLOW}NOTE: HTTP is disabled by default to prevent port conflicts${NC}"
-echo -e "${YELLOW}      You can enable it later by editing ${DUSK_ROOT}/conf/rusk.toml${NC}"
-echo ""
-read -p "Continue with installation? (y/N) " -n 1 -r
-echo
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo "Installation cancelled."
-    exit 0
-fi
 
 # Check if instance already exists
 if [ -d "$DUSK_ROOT" ]; then
-    echo -e "${YELLOW}Warning: Instance ${INSTANCE} already exists at ${DUSK_ROOT}${NC}"
+    echo -e "${YELLOW}Warning: Instance $INSTANCE already exists at $DUSK_ROOT${NC}"
     read -p "Do you want to upgrade/reinstall? (y/N) " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -155,287 +125,244 @@ if [ -d "$DUSK_ROOT" ]; then
     systemctl stop ${SERVICE_NAME} 2>/dev/null || true
 fi
 
-# Create directory structure
-echo -e "${GREEN}Creating directory structure...${NC}"
-mkdir -p ${DUSK_ROOT}/{bin,conf,services,installer,rusk}
-mkdir -p ${DUSK_ROOT}/installer/os
+# Step 1: Download and run official installer to /opt/dusk (temporary)
+echo -e "${GREEN}Step 1: Running official Dusk installer...${NC}"
+echo ""
 
-# Detect OS and architecture
-echo -e "${GREEN}Detecting system...${NC}"
-if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    distro=$(echo "$ID" | tr '[:upper:]' '[:lower:]')
-else
-    echo -e "${RED}Error: Unable to detect OS. /etc/os-release not found.${NC}"
-    exit 1
-fi
+# Create temp directory for official install
+TEMP_INSTALL="/opt/dusk-temp-${INSTANCE}"
+rm -rf "$TEMP_INSTALL"
 
-# Normalize distro ID for compatible derivatives
-case "$distro" in
-    linuxmint*) distro="ubuntu" ;;
-esac
+# Download and run official installer with modified DUSK_ROOT
+export INSTALL_PATH="$TEMP_INSTALL"
 
-echo "Detected OS: $ID"
-echo "Normalized OS: $distro"
-echo "Architecture: $ARCH"
+# Download official installer
+INSTALLER_URL="https://github.com/dusk-network/node-installer/releases/latest/download/node-installer.sh"
+curl -sSfL "$INSTALLER_URL" > /tmp/dusk-installer-${INSTANCE}.sh
 
-# Map architecture
-case "$ARCH" in
-    x86_64)
-        ARCH="x64"
-        ;;
-    aarch64|arm64)
-        ARCH="arm64"
-        ;;
-    *)
-        echo -e "${RED}Error: Unsupported architecture: $ARCH${NC}"
-        exit 1
-        ;;
-esac
-
-# Check OpenSSL version
-echo -e "${GREEN}Checking OpenSSL version...${NC}"
-if ! command -v openssl >/dev/null 2>&1 || [ "$(openssl version | awk '{print $2}' | cut -d. -f1)" -lt 3 ]; then
-    echo -e "${RED}Error: OpenSSL 3 or higher is required${NC}"
-    echo "Please upgrade your OS or install a newer version of OpenSSL"
-    exit 1
-fi
-
-# Download installer package for OS-specific scripts
-INSTALLER_URL="https://github.com/dusk-network/node-installer/tarball/main"
-echo -e "${GREEN}Downloading installer package...${NC}"
-curl -sL "$INSTALLER_URL" -o ${DUSK_ROOT}/installer/installer.tar.gz || {
-    echo -e "${RED}Failed to download installer package${NC}"
+# Run official installer with network and feature flags
+# We'll install to temp location first
+bash /tmp/dusk-installer-${INSTANCE}.sh --network "$NETWORK" --feature "$FEATURE" || {
+    echo -e "${RED}Official installer failed${NC}"
     exit 1
 }
 
-tar xf ${DUSK_ROOT}/installer/installer.tar.gz --strip-components 1 --directory ${DUSK_ROOT}/installer
+echo ""
+echo -e "${GREEN}Step 2: Adapting installation for instance ${INSTANCE}...${NC}"
+echo ""
 
-# Source OS-specific script if available
-OS_SCRIPT="${DUSK_ROOT}/installer/os/${distro}.sh"
-if [ -f "$OS_SCRIPT" ]; then
-    echo -e "${GREEN}Loading OS-specific configuration for ${distro}...${NC}"
-    source "$OS_SCRIPT"
+# Move installation to instance-specific directory
+if [ -d "/opt/dusk" ]; then
+    rm -rf "$DUSK_ROOT"
+    mv /opt/dusk "$DUSK_ROOT"
+    echo -e "${GREEN}✓ Moved installation to ${DUSK_ROOT}${NC}"
 else
-    echo -e "${RED}Error: No OS support script found for ${distro}${NC}"
-    echo "Supported distributions have scripts in ${DUSK_ROOT}/installer/os/"
-    echo "Want to add support? See: https://github.com/dusk-network/node-installer#contributing-os-support"
+    echo -e "${RED}Error: Official installation not found at /opt/dusk${NC}"
     exit 1
 fi
 
-# Install dependencies (OS-specific function from sourced script)
-if type install_deps >/dev/null 2>&1; then
-    echo -e "${GREEN}Installing dependencies...${NC}"
-    install_deps
+# Stop the default rusk service
+systemctl stop rusk 2>/dev/null || true
+systemctl disable rusk 2>/dev/null || true
+
+# Step 3: Adapt service file for this instance
+echo -e "${GREEN}Step 3: Creating instance-specific service...${NC}"
+
+# Copy and modify the service file
+if [ -f "/etc/systemd/system/rusk.service" ]; then
+    # Read the original service file and modify it
+    sed "s|/opt/dusk|${DUSK_ROOT}|g" /etc/systemd/system/rusk.service | \
+    sed "s|Description=.*|Description=DUSK Rusk - Instance ${INSTANCE}|" | \
+    sed "s|rusk.log|rusk-${INSTANCE}.log|g" | \
+    sed "s|rusk_recovery.log|rusk-${INSTANCE}-recovery.log|g" | \
+    sed "s|^User=dusk|User=root|" \
+    > /etc/systemd/system/${SERVICE_NAME}.service
+    
+    # Remove the original service file
+    rm -f /etc/systemd/system/rusk.service
+    
+    echo -e "${GREEN}✓ Service file created: ${SERVICE_NAME}.service (running as root)${NC}"
 else
-    echo -e "${YELLOW}Warning: No install_deps function found in OS script${NC}"
-fi
-
-# Create dusk group if it doesn't exist
-if ! getent group dusk >/dev/null 2>&1; then
-    echo -e "${GREEN}Creating dusk group...${NC}"
-    groupadd dusk
-fi
-
-# Add current user to dusk group
-if ! groups "$CURRENT_USER" | grep -q "\bdusk\b"; then
-    echo -e "${GREEN}Adding user $CURRENT_USER to dusk group...${NC}"
-    usermod -aG dusk "$CURRENT_USER"
-    echo "User $CURRENT_USER has been added to the dusk group."
-    echo -e "${YELLOW}You may need to log out and back in for group changes to take effect.${NC}"
-fi
-
-# Fetch latest release version
-echo -e "${GREEN}Fetching latest Rusk version...${NC}"
-RELEASE_TAG=$(curl -s https://api.github.com/repos/dusk-network/rusk/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
-if [ -z "$RELEASE_TAG" ]; then
-    echo -e "${RED}Failed to fetch latest release version${NC}"
+    echo -e "${RED}Error: Original rusk.service not found${NC}"
     exit 1
 fi
-echo "Latest release: $RELEASE_TAG"
 
-# Extract version number (remove 'v' prefix if present)
-VERSION="${RELEASE_TAG#v}"
-SANITIZED_VERSION=$(echo "$VERSION" | sed 's/-rc//')
+# Update all helper scripts to use instance-specific paths
+echo -e "${GREEN}Updating helper scripts...${NC}"
 
-# Build feature suffix if provided
-FEATURE_SUFFIX=""
-if [ -n "$FEATURE" ]; then
-    FEATURE_SUFFIX="-${FEATURE}"
+# Update all shell scripts in bin directory to replace /opt/dusk with instance path
+# Use word boundary to avoid replacing /opt/dusk1 -> /opt/dusk11
+if [ -d "${DUSK_ROOT}/bin" ]; then
+    for script in ${DUSK_ROOT}/bin/*.sh; do
+        if [ -f "$script" ]; then
+            # Only replace /opt/dusk followed by / or end of line, not /opt/dusk[0-9]
+            sed -i "s|/opt/dusk/|${DUSK_ROOT}/|g" "$script"
+            sed -i "s|/opt/dusk\"|${DUSK_ROOT}\"|g" "$script"
+            sed -i "s|/opt/dusk'|${DUSK_ROOT}'|g" "$script"
+            sed -i "s|/opt/dusk\$|${DUSK_ROOT}|g" "$script"
+            sed -i "s|/opt/dusk |${DUSK_ROOT} |g" "$script"
+        fi
+    done
+    echo -e "${GREEN}✓ Helper scripts updated${NC}"
 fi
 
-# Download and install Rusk
-download_component() {
-    local component=$1
-    local component_dir="${DUSK_ROOT}/bin"
-    
-    echo -e "${GREEN}Downloading ${component}...${NC}"
-    
-    local url="https://github.com/dusk-network/rusk/releases/download/${RELEASE_TAG}-${VERSION}/${component}-${SANITIZED_VERSION}-linux-${ARCH}${FEATURE_SUFFIX}.tar.gz"
-    
-    curl -sL "$url" -o ${DUSK_ROOT}/installer/${component}.tar.gz || {
-        echo -e "${RED}Failed to download ${component}${NC}"
-        echo "URL: $url"
-        exit 1
-    }
-    
-    tar xf ${DUSK_ROOT}/installer/${component}.tar.gz --strip-components 1 --directory "$component_dir"
-    
-    # Make binaries executable
-    chmod +x ${component_dir}/*
-}
+# Update any other scripts that might reference /opt/dusk (not followed by digits)
+find ${DUSK_ROOT} -type f \( -name "*.sh" -o -name "rusk*" \) -exec sed -i \
+    -e "s|/opt/dusk/|${DUSK_ROOT}/|g" \
+    -e "s|/opt/dusk\"|${DUSK_ROOT}\"|g" \
+    -e "s|/opt/dusk'|${DUSK_ROOT}'|g" \
+    -e "s|/opt/dusk\$|${DUSK_ROOT}|g" \
+    -e "s|/opt/dusk |${DUSK_ROOT} |g" \
+    {} \;
 
-# Download components
-download_component "rusk"
-download_component "rusk-wallet"
+# Step 4: Update configuration files with instance-specific ports
+echo -e "${GREEN}Step 4: Configuring instance-specific ports...${NC}"
 
-# Download network configuration
-echo -e "${GREEN}Downloading ${NETWORK} configuration...${NC}"
-CONFIG_URL="https://raw.githubusercontent.com/dusk-network/node-installer/main/conf/${NETWORK}.toml"
-curl -sL "$CONFIG_URL" -o ${DUSK_ROOT}/conf/rusk.toml || {
-    echo -e "${RED}Failed to download configuration for ${NETWORK}${NC}"
-    exit 1
-}
+# Update rusk.toml - enable HTTP with instance-specific port on localhost only
+if [ -f "${DUSK_ROOT}/conf/rusk.toml" ]; then
+    # Remove any existing [http] section
+    sed -i '/^\[http\]/,/^$/d' "${DUSK_ROOT}/conf/rusk.toml"
+    
+    # Add HTTP configuration with instance-specific port (localhost only)
+    cat >> ${DUSK_ROOT}/conf/rusk.toml << EOF
 
-# Modify rusk.toml to disable HTTP and set Kadcast port
-echo -e "${GREEN}Configuring rusk.toml...${NC}"
-
-# Add HTTP disabled configuration at the end
-cat >> ${DUSK_ROOT}/conf/rusk.toml << EOF
-
-# HTTP Configuration - Disabled for multi-instance setup
+# HTTP Configuration - Instance ${INSTANCE} (localhost only)
 [http]
-listen = false
+listen = true
+listen_address = "127.0.0.1:${HTTP_PORT}"
 EOF
+    echo -e "${GREEN}✓ HTTP enabled on 127.0.0.1:${HTTP_PORT} (localhost only)${NC}"
+fi
 
-echo "HTTP disabled in configuration"
+# Auto-detect public IP
+echo -e "${GREEN}Detecting public IP address...${NC}"
+PUBLIC_IP=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || \
+            curl -s --max-time 5 https://ifconfig.me 2>/dev/null || \
+            hostname -I | awk '{print $1}')
 
-# Create service configuration for Kadcast
-echo -e "${GREEN}Configuring Kadcast ports...${NC}"
+if [[ ! "$PUBLIC_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    PUBLIC_IP="0.0.0.0"
+    echo -e "${YELLOW}Warning: Could not detect valid IP, using 0.0.0.0${NC}"
+else
+    echo -e "${GREEN}✓ Detected public IP: ${PUBLIC_IP}${NC}"
+fi
+
+# Update Kadcast configuration
 cat > ${DUSK_ROOT}/services/rusk.conf.user << EOF
 # Kadcast configuration for instance ${INSTANCE}
-KADCAST_PUBLIC_ADDRESS=0.0.0.0:${KADCAST_PORT}
-KADCAST_LISTEN_ADDRESS=0.0.0.0:${KADCAST_PORT}
+KADCAST_PUBLIC_ADDRESS=${PUBLIC_IP}:${KADCAST_PORT}
+KADCAST_LISTEN_ADDRESS=${PUBLIC_IP}:${KADCAST_PORT}
 EOF
 
-echo "Kadcast configured on port ${KADCAST_PORT}"
+echo -e "${GREEN}✓ Kadcast configured: ${PUBLIC_IP}:${KADCAST_PORT}${NC}"
 
-# Create systemd service file
-echo -e "${GREEN}Creating systemd service...${NC}"
-cat > /etc/systemd/system/${SERVICE_NAME}.service << EOF
-[Unit]
-Description=Dusk Rusk Node - Instance ${INSTANCE}
-After=network.target
-Wants=network.target
+# Step 5: Configure firewall
+echo -e "${GREEN}Step 5: Configuring firewall...${NC}"
 
-[Service]
-Type=simple
-User=root
-WorkingDirectory=${DUSK_ROOT}
-ExecStart=${DUSK_ROOT}/bin/rusk --config ${DUSK_ROOT}/conf/rusk.toml
-StandardOutput=append:${LOG_FILE}
-StandardError=append:${LOG_FILE}
-Restart=always
-RestartSec=10
-Environment="NETWORK=${NETWORK}"
-EnvironmentFile=-/opt/dusk/services/dusk.conf
-EnvironmentFile=-${DUSK_ROOT}/services/rusk.conf.user
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Set permissions
-echo -e "${GREEN}Setting permissions...${NC}"
-chown -R root:dusk ${DUSK_ROOT}
-chmod -R 775 ${DUSK_ROOT}
-chmod 750 ${DUSK_ROOT}/bin/*
-
-# Create log files
-touch ${LOG_FILE}
-touch ${LOG_FILE_RECOVERY}
-chown root:dusk ${LOG_FILE}
-chown root:dusk ${LOG_FILE_RECOVERY}
-chmod 664 ${LOG_FILE}
-chmod 664 ${LOG_FILE_RECOVERY}
-
-# Configure log rotation
-if type configure_logrotate >/dev/null 2>&1; then
-    echo -e "${GREEN}Configuring log rotation...${NC}"
-    configure_logrotate
+if command -v ufw >/dev/null 2>&1; then
+    if ufw status | grep -q "Status: active"; then
+        ufw allow ${KADCAST_PORT}/udp 2>/dev/null
+        echo -e "${GREEN}✓ Port ${KADCAST_PORT}/udp opened (Kadcast)${NC}"
+    else
+        echo -e "${YELLOW}UFW is not active. Please open port ${KADCAST_PORT}/udp manually${NC}"
+    fi
 else
-    # Default log rotation configuration
-    cat > /etc/logrotate.d/${SERVICE_NAME} << EOF
-${LOG_FILE} {
+    echo -e "${YELLOW}UFW not found. Please open port ${KADCAST_PORT}/udp manually${NC}"
+fi
+
+# Step 6: Update logrotate configuration
+echo -e "${GREEN}Step 6: Configuring log rotation...${NC}"
+
+cat > /etc/logrotate.d/${SERVICE_NAME} << EOF
+/var/log/rusk-${INSTANCE}.log {
     daily
     rotate 7
     compress
     delaycompress
     missingok
     notifempty
-    create 0664 root dusk
+    create 0644 root root
 }
 
-${LOG_FILE_RECOVERY} {
+/var/log/rusk-${INSTANCE}-recovery.log {
     daily
     rotate 7
     compress
     delaycompress
     missingok
     notifempty
-    create 0664 root dusk
+    create 0644 root root
 }
 EOF
-fi
+
+# Remove old logrotate config if exists
+rm -f /etc/logrotate.d/rusk
+
+echo -e "${GREEN}✓ Log rotation configured${NC}"
 
 # Reload systemd
 systemctl daemon-reload
 
-# Display firewall information
+# Step 7: Consensus keys
+echo ""
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}Consensus Keys Configuration${NC}"
+echo -e "${GREEN}========================================${NC}"
+echo ""
+
+if command -v sozu-beta3-rusk-wallet >/dev/null 2>&1; then
+    echo -e "${CYAN}Enter the path to your wallet (e.g., ~/sozu_provisioner):${NC}"
+    read -r WALLET_PATH
+    
+    if [ -n "$WALLET_PATH" ]; then
+        WALLET_PATH="${WALLET_PATH/#\~/$HOME}"
+        PROFILE_IDX=$((INSTANCE - 1))
+        
+        echo -e "${GREEN}Exporting keys for profile ${PROFILE_IDX}...${NC}"
+        if sozu-beta3-rusk-wallet -w "${WALLET_PATH}" export --profile-idx ${PROFILE_IDX} -d ${DUSK_ROOT}/conf -n consensus.keys; then
+            chmod 600 ${DUSK_ROOT}/conf/consensus.keys
+            echo -e "${GREEN}✓ Consensus keys exported${NC}"
+            
+            echo -e "${CYAN}Enter consensus keys password:${NC}"
+            read -s CONSENSUS_PASSWORD
+            echo
+            
+            if [ -n "$CONSENSUS_PASSWORD" ]; then
+                echo "DUSK_CONSENSUS_KEYS_PASS=${CONSENSUS_PASSWORD}" > ${DUSK_ROOT}/services/dusk.conf
+                chmod 600 ${DUSK_ROOT}/services/dusk.conf
+                echo -e "${GREEN}✓ Password configured${NC}"
+            fi
+        fi
+    fi
+fi
+
+# Final summary
 echo ""
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}Installation Complete!${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
-echo -e "${YELLOW}IMPORTANT: Firewall Configuration${NC}"
-echo "You need to open the following port for this instance:"
-echo -e "  ${GREEN}${KADCAST_PORT}/udp${NC} - Kadcast consensus (REQUIRED)"
+echo -e "${YELLOW}Instance ${INSTANCE} Details:${NC}"
+echo -e "  Installation: ${DUSK_ROOT}"
+echo -e "  Service:      ${SERVICE_NAME}"
+echo -e "  Kadcast:      ${PUBLIC_IP}:${KADCAST_PORT}/udp"
+echo -e "  HTTP:         127.0.0.1:${HTTP_PORT} (localhost only)"
+echo -e "  Logs:         ${LOG_FILE}"
 echo ""
-echo "Example firewall commands:"
-echo "  ufw allow ${KADCAST_PORT}/udp"
-echo "  # OR"
-echo "  iptables -A INPUT -p udp --dport ${KADCAST_PORT} -j ACCEPT"
+echo -e "${YELLOW}Next Steps:${NC}"
 echo ""
-echo -e "${YELLOW}NEXT STEPS:${NC}"
-echo ""
-echo "1. Configure consensus keys:"
-echo "   ${DUSK_ROOT}/bin/rusk-wallet export -d ${DUSK_ROOT}/conf -n consensus.keys"
-echo ""
-echo "2. Set consensus keys password (if not already set):"
-echo "   echo 'DUSK_CONSENSUS_KEYS_PASS=your_password' | sudo tee /opt/dusk/services/dusk.conf"
-echo ""
-echo "3. Update Kadcast public address (replace YOUR_PUBLIC_IP):"
-echo "   echo 'KADCAST_PUBLIC_ADDRESS=YOUR_PUBLIC_IP:${KADCAST_PORT}' | sudo tee ${DUSK_ROOT}/services/rusk.conf.user"
-echo "   echo 'KADCAST_LISTEN_ADDRESS=0.0.0.0:${KADCAST_PORT}' | sudo tee -a ${DUSK_ROOT}/services/rusk.conf.user"
-echo ""
-echo "4. Enable and start the service:"
+echo "1. Start the service:"
 echo "   sudo systemctl enable ${SERVICE_NAME}"
 echo "   sudo systemctl start ${SERVICE_NAME}"
 echo ""
-echo "5. Check service status:"
+echo "2. Check status:"
 echo "   sudo systemctl status ${SERVICE_NAME}"
-echo "   sudo journalctl -u ${SERVICE_NAME} -f"
-echo ""
-echo "6. View logs:"
 echo "   tail -f ${LOG_FILE}"
 echo ""
-echo -e "${YELLOW}Installation Directory:${NC} ${DUSK_ROOT}"
-echo -e "${YELLOW}Service Name:${NC} ${SERVICE_NAME}"
-echo -e "${YELLOW}Kadcast Port:${NC} ${KADCAST_PORT}/udp"
-echo -e "${YELLOW}HTTP:${NC} Disabled (can be enabled in ${DUSK_ROOT}/conf/rusk.toml)"
+echo "3. Verify HTTP endpoint:"
+echo "   curl http://localhost:${HTTP_PORT}/"
 echo ""
-echo -e "${GREEN}To enable HTTP later, edit ${DUSK_ROOT}/conf/rusk.toml:${NC}"
-echo "  [http]"
-echo "  listen = true"
-echo "  listen_address = \"0.0.0.0:${HTTP_PORT}\""
+echo "4. If you didn't export keys above, do it manually:"
+echo "   sozu-beta3-rusk-wallet -w ~/sozu_provisioner export --profile-idx $((INSTANCE - 1)) -d ${DUSK_ROOT}/conf -n consensus.keys"
+echo "   echo 'DUSK_CONSENSUS_KEYS_PASS=your_password' > ${DUSK_ROOT}/services/dusk.conf"
 echo ""
