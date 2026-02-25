@@ -1,0 +1,1729 @@
+<!DOCTYPE html>
+<!-- Provisioner Dashboard  v0.5.16 -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Provisioner Manager</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;600;700&display=swap');
+
+  :root {
+    --bg:       #0a0c10;
+    --bg1:      #0f1318;
+    --bg2:      #141920;
+    --bg3:      #1c232c;
+    --border:   #1f2a35;
+    --border2:  #28374a;
+    --text:     #c9d4df;
+    --muted:    #526475;
+    --dim:      #384d5e;
+    --green:    #4ec994;
+    --green2:   #0d2a1e;
+    --yellow:   #e6b84a;
+    --blue:     #4a9eff;
+    --blue2:    #0d1f3a;
+    --purple:   #b08aff;
+    --red:      #ff5c5c;
+    --red2:     #2a0d0d;
+    --cyan:     #3ecfcf;
+    --orange:   #ff8c42;
+    --teal:     #2dd4b8;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overflow: hidden; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── TOP NAV ── */
+  nav {
+    height: auto;
+    background: var(--bg1);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 0;
+    flex-shrink: 0;
+    position: relative;
+  }
+  .nav-rows {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+  }
+  .nav-row {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 3px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .nav-row:last-child { border-bottom: none; }
+  .nav-btn-action { color: var(--yellow); }
+  .nav-btn-action:hover { color: var(--text); background: #2a1f00; border-color: var(--yellow); }
+
+  .nav-brand {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--teal);
+    letter-spacing: .04em;
+    margin-right: 24px;
+    white-space: nowrap;
+  }
+  .nav-brand span { color: var(--muted); font-weight: 300; }
+
+  .nav-sep { width: 1px; height: 24px; background: var(--border); margin: 0 8px; }
+
+  .nav-group {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-right: 6px;
+  }
+  .nav-group-label {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: var(--muted);
+    padding: 0 8px;
+  }
+
+  .nav-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 11px;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    color: var(--muted);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all .12s;
+    white-space: nowrap;
+  }
+  .nav-btn:hover { color: var(--text); background: var(--bg2); border-color: var(--border); }
+  .nav-btn.active { color: var(--teal); background: rgba(45,212,184,.08); border-color: rgba(45,212,184,.3); }
+  .nav-btn .dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+
+  .nav-status {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+  }
+  .status-chip {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--muted);
+  }
+  .status-chip .dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+  }
+  .dot-green  { background: var(--green); box-shadow: 0 0 5px var(--green); }
+  .dot-yellow { background: var(--yellow); }
+  .dot-red    { background: var(--red); }
+  .dot-pulse  { animation: blink .9s infinite; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+  /* ── BODY GRID ── */
+  .body {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    overflow: hidden;
+    min-height: 0;
+    height: 0; /* let flex handle height */
+  }
+
+  .col {
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--border);
+    overflow: hidden;
+    min-height: 0;
+  }
+  .col:last-child { border-right: none; }
+
+  .col-head {
+    padding: 9px 14px;
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+  .col-title {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: var(--muted);
+  }
+  .col-badge {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 9px;
+    padding: 2px 6px;
+    border-radius: 3px;
+  }
+
+  .col-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0;
+    min-height: 0;
+  }
+  .col-body::-webkit-scrollbar { width: 4px; }
+  .col-body::-webkit-scrollbar-track { background: transparent; }
+  .col-body::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+  /* ── LEFT: COMMAND OUTPUT ── */
+  #col-left .col-body { padding: 0; }
+
+  .cmd-welcome {
+    padding: 20px 16px;
+    color: var(--dim);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    line-height: 1.8;
+  }
+  .cmd-welcome .wl { color: var(--teal); }
+
+  .cmd-block {
+    border-bottom: 1px solid var(--border);
+    padding: 12px 14px;
+    animation: fadein .2s ease;
+  }
+  @keyframes fadein { from { opacity:0; transform: translateY(-4px); } to { opacity:1; transform:none; } }
+
+  .cmd-meta {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+  .cmd-ts {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+    color: var(--dim);
+  }
+  .cmd-name {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--teal);
+  }
+  .cmd-dur {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 9px;
+    color: var(--dim);
+    margin-left: auto;
+  }
+
+  .cmd-output {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text);
+    background: var(--bg3);
+    border-radius: 4px;
+    padding: 8px 10px;
+  }
+  .cmd-output.ok  { border-left: 2px solid var(--green); }
+  .cmd-output.err { border-left: 2px solid var(--red); color: var(--red); }
+
+  .cmd-spinner {
+    display: inline-block;
+    width: 10px; height: 10px;
+    border: 1.5px solid var(--border2);
+    border-top-color: var(--teal);
+    border-radius: 50%;
+    animation: spin .6s linear infinite;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── MIDDLE: SOZU EVENTS ── */
+  .event-row {
+    padding: 7px 14px;
+    border-bottom: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: 60px 80px 140px 1fr;
+    gap: 8px;
+    align-items: start;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    animation: fadein .15s ease;
+  }
+  .event-row:hover { background: var(--bg2); }
+  .event-row.ev-mine { background: rgba(100,220,140,0.18); border-left: 4px solid var(--green); font-weight: 500; }
+  .event-row.ev-mine:hover { background: rgba(100,220,140,0.28); }
+  .ev-ts     { color: var(--dim); }
+  .ev-block  { color: var(--muted); text-align: right; }
+  .ev-topic  { font-weight: 600; }
+  .ev-data   { color: var(--muted); font-size: 10px; word-break: break-word; line-height: 1.5; }
+
+  .topic-activate    { color: var(--green); }
+  .topic-deactivate  { color: var(--purple); }
+  .topic-reward-recycle  { color: var(--yellow); }
+  .topic-reward-terminate { color: var(--orange); }
+  .topic-deposit     { color: var(--cyan); }
+  .topic-unstake     { color: var(--teal); }
+  .topic-liquidate          { color: var(--red); }
+  .topic-terminate          { color: var(--red); }
+  .topic-add-provisioner    { color: var(--green); }
+  .topic-remove-provisioner { color: var(--red); }
+  .topic-default            { color: var(--text); }
+
+  .ev-header-row {
+    padding: 5px 14px;
+    border-bottom: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: 60px 80px 140px 1fr;
+    gap: 8px;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: var(--dim);
+    background: var(--bg2);
+    flex-shrink: 0;
+  }
+
+  .ev-empty {
+    padding: 32px 16px;
+    text-align: center;
+    color: var(--dim);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    line-height: 2;
+  }
+
+  /* ── RIGHT: PLACEHOLDER ── */
+  /* ── Live provisioner panel ── */
+  .prov-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 7px 10px;
+    margin-bottom: 6px;
+  }
+  .prov-status {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .prov-status.active   { color: var(--green); }
+  .prov-status.maturing { color: var(--yellow); }
+  .prov-status.inactive { color: var(--dim); }
+  .prov-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+  .prov-row span:last-child { color: var(--text); font-family: 'IBM Plex Mono', monospace; }
+  .epoch-bar-wrap {
+    background: var(--bg3);
+    border-radius: 3px;
+    height: 4px;
+    margin-top: 10px;
+    overflow: hidden;
+  }
+  .epoch-bar-fill {
+    height: 100%;
+    background: var(--teal);
+    border-radius: 3px;
+    transition: width 1s linear;
+  }
+
+  .placeholder {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    color: var(--dim);
+    font-family: 'IBM Plex Mono', monospace;
+    text-align: center;
+    padding: 40px;
+  }
+  .placeholder-hex {
+    font-size: 42px;
+    opacity: .08;
+    line-height: 1.1;
+    letter-spacing: -.02em;
+    font-weight: 600;
+  }
+  .placeholder-text { font-size: 11px; line-height: 1.8; }
+
+  /* ── CONFIRM MODAL ── */
+  .modal-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,.7);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: var(--bg2);
+    border: 1px solid var(--border2);
+    border-radius: 8px;
+    padding: 24px;
+    min-width: 320px;
+    max-width: 480px;
+  }
+  .modal-title { font-weight: 600; font-size: 14px; margin-bottom: 8px; color: var(--text); }
+  .modal-body  { color: var(--muted); font-size: 12px; margin-bottom: 20px; line-height: 1.6; }
+  .modal-input {
+    width: 100%;
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    border-radius: 4px;
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    padding: 7px 10px;
+    outline: none;
+    margin-bottom: 16px;
+  }
+  .modal-input:focus { border-color: var(--teal); }
+  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+  .mbtn {
+    padding: 7px 14px;
+    border-radius: 4px;
+    border: 1px solid;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all .1s;
+  }
+  .mbtn-cancel { background: none; border-color: var(--border); color: var(--muted); }
+  .mbtn-cancel:hover { color: var(--text); }
+  .mbtn-confirm { background: var(--green2); border-color: var(--green); color: var(--green); }
+  .mbtn-confirm:hover { background: #0f3526; }
+  .mbtn-danger  { background: var(--red2); border-color: var(--red); color: var(--red); }
+  .mbtn-danger:hover { background: #360f0f; }
+</style>
+</head>
+<body>
+
+<!-- ── NAV ── -->
+<nav>
+  <div class="nav-brand">prov<span>manager</span></div>
+  <div class="nav-sep"></div>
+  <div class="nav-rows">
+    <div class="nav-row">
+      <div class="nav-group-label">info</div>
+      <button class="nav-btn" onclick="cmdStakeInfoAll()"><span class="dot"></span>stake info</button>
+      <button class="nav-btn" onclick="cmdBalance()"><span class="dot"></span>balance</button>
+      <button class="nav-btn" onclick="cmdProfiles()"><span class="dot"></span>profiles</button>
+      <button class="nav-btn" onclick="cmdContractBalance()"><span class="dot"></span>pool balance</button>
+      <button class="nav-btn" onclick="cmdExchangeRate()"><span class="dot"></span>exchange rate</button>
+      <button class="nav-btn nav-btn-action" onclick="cmdRecycle()"><span class="dot"></span>recycle</button>
+      <button class="nav-btn" onclick="openModal('modal-config')" style="margin-left:auto;color:var(--cyan)"><span class="dot"></span>⚙ config</button>
+    </div>
+    <div class="nav-row">
+      <div class="nav-group-label">actions</div>
+      <button class="nav-btn nav-btn-action" onclick="cmdListProvisioners()"><span class="dot"></span>list provisioners</button>
+      <button class="nav-btn nav-btn-action" onclick="openModal('modal-alloc-stake')"><span class="dot"></span>allocate stake</button>
+      <button class="nav-btn nav-btn-action" onclick="openModal('modal-deactivate')"><span class="dot"></span>deactivate stake</button>
+      <button class="nav-btn nav-btn-action" onclick="openModal('modal-liq-term')"><span class="dot"></span>liquidate &amp; terminate</button>
+      <button class="nav-btn nav-btn-action" onclick="openModal('modal-add-prov')"><span class="dot"></span>add provisioner</button>
+      <button class="nav-btn nav-btn-action" onclick="openModal('modal-remove')"><span class="dot"></span>remove provisioner</button>
+      <button class="nav-btn nav-btn-action" onclick="openModal('modal-withdraw-rewards')"><span class="dot"></span>withdraw rewards</button>
+    </div>
+  </div>
+
+  <div class="nav-status">
+    <div class="status-chip">
+      <span class="dot dot-green dot-pulse" id="api-dot"></span>
+      <span id="api-status">connecting…</span>
+    </div>
+    <div class="status-chip" id="tip-chip">
+      <span class="dot dot-yellow"></span>
+      <span id="tip-val">—</span>
+    </div>
+    <div class="status-chip" style="color:var(--dim); font-size:10px;" id="clock"></div>
+    <button onclick="openPwModal()" style="background:none;border:1px solid var(--border);border-radius:4px;
+      color:var(--muted);font-family:'IBM Plex Mono',monospace;font-size:10px;padding:3px 9px;cursor:pointer;
+      display:flex;align-items:center;gap:5px;" id="pw-nav-btn">
+      <span id="pw-indicator" style="width:5px;height:5px;border-radius:50%;background:var(--dim);"></span>
+      <span id="pw-nav-label">set password</span>
+    </button>
+  </div>
+</nav>
+
+<!-- ── BODY ── -->
+<div class="body">
+
+  <!-- LEFT: command output -->
+  <div class="col" id="col-left">
+    <div class="col-head">
+      <div class="col-title">Command Output</div>
+      <button style="background:none;border:none;color:var(--dim);font-size:10px;cursor:pointer;font-family:'IBM Plex Mono',monospace;" onclick="clearOutput()">clear</button>
+    </div>
+    <div class="col-body" id="output-body">
+      <div class="cmd-welcome">
+        <div class="wl">provisioner manager</div>
+        <div>select a command from the menu above</div>
+        <div style="margin-top:8px; color:var(--dim)">results will appear here</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MIDDLE: sozu events -->
+  <div class="col" id="col-mid">
+    <div class="col-head">
+      <div class="col-title">SOZU Events</div>
+      <div id="config-warning" style="display:none;font-size:10px;color:var(--yellow);cursor:pointer;" onclick="openModal('modal-config')">⚠ config incomplete</div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <div style="display:flex;align-items:center;gap:4px;">
+          <input id="backfill-n" type="number" value="100" min="1" max="5000"
+                 style="width:64px;background:var(--bg3);border:1px solid var(--border);border-radius:3px;
+                        color:var(--text);font-family:'IBM Plex Mono',monospace;font-size:10px;
+                        padding:2px 6px;outline:none;text-align:right;"
+                 title="Number of blocks to backfill">
+          <span style="font-size:9px;color:var(--dim)">blk</span>
+          <button onclick="doBackfill()" id="backfill-btn" style="background:var(--bg3);border:1px solid var(--border);
+                  border-radius:3px;color:var(--cyan);font-family:'IBM Plex Mono',monospace;
+                  font-size:10px;padding:2px 8px;cursor:pointer;" title="Backfill N blocks">backfill</button>
+          <button onclick="togglePollerErrors()" id="errors-btn" style="background:var(--bg3);border:1px solid var(--border);
+                  border-radius:3px;color:var(--dim);font-family:'IBM Plex Mono',monospace;
+                  font-size:10px;padding:2px 6px;cursor:pointer;" title="Show poller errors">errs</button>
+        </div>
+        <div class="status-chip" style="font-family:'IBM Plex Mono',monospace; font-size:10px;">
+          <span class="dot dot-green dot-pulse" id="stream-dot"></span>
+          <span id="stream-status">connecting…</span>
+        </div>
+      </div>
+    </div>
+    <div class="ev-header-row">
+      <span>time</span><span style="text-align:right">block</span><span>topic</span><span>data</span>
+    </div>
+    <div id="poller-errors-panel" style="display:none;background:var(--bg2);border-bottom:1px solid var(--border);
+         font-family:'IBM Plex Mono',monospace;font-size:10px;max-height:140px;overflow-y:auto;padding:8px 12px;">
+      <div style="color:var(--yellow);margin-bottom:4px;">Poller errors</div>
+      <div id="poller-errors-body" style="color:var(--red);"></div>
+    </div>
+    <div class="col-body" id="events-body">
+      <div class="ev-empty">waiting for events…<br><span style="color:var(--dim)">polling every 4s</span></div>
+    </div>
+  </div>
+
+  <!-- RIGHT: live provisioner view -->
+  <div class="col" id="col-right" style="display:flex;flex-direction:column;">
+    <div class="col-head" style="flex-shrink:0;">
+      <div class="col-title">Provisioner Live View</div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <div id="epoch-chip" style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--cyan);">epoch —</div>
+        <div id="epoch-countdown" style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--muted);">— blk</div>
+        <div id="live-dot" style="width:6px;height:6px;border-radius:50%;background:var(--dim);"></div>
+      </div>
+    </div>
+    <!-- Rotation Manager Panel -->
+    <div id="rotation-panel" style="flex:1;min-height:0;border-bottom:1px solid var(--border);padding:8px 14px;background:var(--bg1);display:flex;flex-direction:column;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-shrink:0;">
+        <span style="font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);">Auto Rotation</span>
+        <div id="rot-dot" style="width:6px;height:6px;border-radius:50%;background:var(--dim);"></div>
+        <span id="rot-state" style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--dim);">disabled</span>
+        <span id="rot-step"  style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
+        <label id="rot-toggle" onclick="toggleRotation()" title="Toggle auto-rotation"
+          style="display:flex;align-items:center;cursor:pointer;user-select:none;flex-shrink:0;">
+          <span id="rot-toggle-track"
+            style="position:relative;display:inline-block;width:32px;height:17px;
+                   background:var(--bg3);border:1px solid var(--border);border-radius:9px;
+                   transition:background .2s,border-color .2s;">
+            <span id="rot-toggle-thumb"
+              style="position:absolute;top:2px;left:2px;width:11px;height:11px;
+                     border-radius:50%;background:var(--dim);
+                     transition:transform .2s,background .2s;"></span>
+          </span>
+        </label>
+      </div>
+      <div id="rot-log" style="font-family:'IBM Plex Mono',monospace;font-size:9px;
+           color:var(--dim);flex:1;min-height:0;overflow-y:auto;line-height:1.5;"></div>
+    </div>
+    <!-- Node 0 - compact -->
+    <div style="flex-shrink:0;border-bottom:1px solid var(--border);">
+      <div style="padding:6px 14px 4px;font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);">Provisioner 0</div>
+      <div id="node0-body" style="padding:0 14px 8px;"></div>
+    </div>
+    <!-- Node 1 - compact -->
+    <div style="flex-shrink:0;">
+      <div style="padding:6px 14px 4px;font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);">Provisioner 1</div>
+      <div id="node1-body" style="padding:0 14px 8px;"></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── PASSWORD MODAL ── -->
+<div class="modal-overlay open" id="pw-modal">
+  <div class="modal" style="min-width:360px;">
+    <div class="modal-title" style="color:var(--teal);">Wallet Password</div>
+    <div class="modal-body">Enter your wallet password to authenticate commands.<br>It stays in memory only — never stored or logged.</div>
+    <input class="modal-input" id="wallet-password" type="password"
+           placeholder="Enter wallet password…"
+           autocomplete="current-password"
+           onkeydown="if(event.key==='Enter') confirmPassword()">
+    <div class="modal-actions">
+      <button class="mbtn mbtn-cancel" onclick="closeModal('pw-modal')">skip</button>
+      <button class="mbtn mbtn-confirm" onclick="confirmPassword()">confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── MODALS ── -->
+
+<!-- Add provisioner -->
+<div class="modal-overlay" id="modal-add-prov">
+  <div class="modal">
+    <div class="modal-title">Add Provisioner</div>
+    <div class="modal-body">Add a provisioner to the SOZU pool using the operator wallet.</div>
+    <input class="modal-input" id="add-prov-op" type="text" placeholder="Operator address (base58)">
+    <input class="modal-input" id="add-prov-addr" type="text" placeholder="Provisioner address (base58)">
+    <div class="modal-actions">
+      <button class="mbtn mbtn-cancel" onclick="closeModal('modal-add-prov')">cancel</button>
+      <button class="mbtn mbtn-confirm" onclick="doAddProvisioner()">add provisioner</button>
+    </div>
+  </div>
+</div>
+
+<!-- Allocate stake -->
+<div class="modal-overlay" id="modal-alloc-stake">
+  <div class="modal">
+    <div class="modal-title">Allocate Stake</div>
+    <div class="modal-body" style="margin-bottom:12px;">Choose which provisioner(s) to stake, and enter the amount.</div>
+    <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:12px;">
+      <label id="alloc-prov0-label" style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 10px;border:1px solid var(--border);border-radius:4px;">
+        <input type="checkbox" id="alloc-check-0" style="accent-color:var(--cyan);width:14px;height:14px;">
+        <span style="flex:1;">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;">Provisioner 0</span>
+          <span id="alloc-prov0-status" style="font-size:10px;color:var(--muted);margin-left:8px;"></span><br>
+          <span id="alloc-prov0-addr"  style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--dim);">—</span>
+        </span>
+        <span id="alloc-prov0-sk-indicator" style="font-size:9px;color:var(--dim);">no SK</span>
+      </label>
+      <label id="alloc-prov1-label" style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 10px;border:1px solid var(--border);border-radius:4px;">
+        <input type="checkbox" id="alloc-check-1" style="accent-color:var(--cyan);width:14px;height:14px;">
+        <span style="flex:1;">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;">Provisioner 1</span>
+          <span id="alloc-prov1-status" style="font-size:10px;color:var(--muted);margin-left:8px;"></span><br>
+          <span id="alloc-prov1-addr"  style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--dim);">—</span>
+        </span>
+        <span id="alloc-prov1-sk-indicator" style="font-size:9px;color:var(--dim);">no SK</span>
+      </label>
+    </div>
+    <input class="modal-input" id="alloc-amt" type="number" placeholder="Amount in DUSK per selected provisioner" min="1" style="margin-bottom:4px;">
+    <div id="alloc-status" style="font-size:11px;min-height:16px;color:var(--dim);margin-bottom:8px;"></div>
+    <div class="modal-actions">
+      <button class="mbtn mbtn-cancel" onclick="closeModal('modal-alloc-stake')">cancel</button>
+      <button class="mbtn mbtn-confirm" onclick="doAllocateStake()">allocate stake</button>
+    </div>
+  </div>
+</div>
+
+<!-- Deactivate stake -->
+<div class="modal-overlay" id="modal-deactivate">
+  <div class="modal">
+    <div class="modal-title">Deactivate Stake</div>
+    <div class="modal-body" style="margin-bottom:12px;">Remove stake from a provisioner not yet in consensus (stake_deactivate).</div>
+    <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:12px;">
+      <label id="deact-prov0-label" style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 10px;border:1px solid var(--border);border-radius:4px;">
+        <input type="radio" name="deact-prov" id="deact-radio-0" value="0" style="accent-color:var(--yellow);width:14px;height:14px;">
+        <span style="flex:1;">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;">Provisioner 0</span>
+          <span id="deact-prov0-status" style="font-size:10px;color:var(--muted);margin-left:8px;"></span><br>
+          <span id="deact-prov0-addr" style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--dim);">—</span>
+        </span>
+      </label>
+      <label id="deact-prov1-label" style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 10px;border:1px solid var(--border);border-radius:4px;">
+        <input type="radio" name="deact-prov" id="deact-radio-1" value="1" style="accent-color:var(--yellow);width:14px;height:14px;">
+        <span style="flex:1;">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;">Provisioner 1</span>
+          <span id="deact-prov1-status" style="font-size:10px;color:var(--muted);margin-left:8px;"></span><br>
+          <span id="deact-prov1-addr" style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--dim);">—</span>
+        </span>
+      </label>
+    </div>
+    <div id="deact-status" style="font-size:11px;min-height:16px;color:var(--dim);margin-bottom:8px;"></div>
+    <div class="modal-actions">
+      <button class="mbtn mbtn-cancel" onclick="closeModal('modal-deactivate')">cancel</button>
+      <button class="mbtn mbtn-danger" onclick="doDeactivateStake()">deactivate</button>
+    </div>
+  </div>
+</div>
+
+<!-- Liquidate -->
+
+<!-- Terminate -->
+
+<!-- Liquidate + Terminate -->
+<div class="modal-overlay" id="modal-liq-term">
+  <div class="modal">
+    <div class="modal-title">Liquidate &amp; Terminate</div>
+    <div class="modal-body" style="margin-bottom:12px;">Remove active provisioner from consensus and return funds to pool. Liquidates then terminates sequentially.</div>
+    <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:12px;">
+      <label id="liqterm-prov0-label" style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 10px;border:1px solid var(--border);border-radius:4px;">
+        <input type="radio" name="liqterm-prov" id="liqterm-radio-0" value="0" style="accent-color:var(--yellow);width:14px;height:14px;">
+        <span style="flex:1;">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;">Provisioner 0</span>
+          <span id="liqterm-prov0-status" style="font-size:10px;color:var(--muted);margin-left:8px;"></span><br>
+          <span id="liqterm-prov0-addr" style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--dim);">—</span>
+        </span>
+      </label>
+      <label id="liqterm-prov1-label" style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 10px;border:1px solid var(--border);border-radius:4px;">
+        <input type="radio" name="liqterm-prov" id="liqterm-radio-1" value="1" style="accent-color:var(--yellow);width:14px;height:14px;">
+        <span style="flex:1;">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;">Provisioner 1</span>
+          <span id="liqterm-prov1-status" style="font-size:10px;color:var(--muted);margin-left:8px;"></span><br>
+          <span id="liqterm-prov1-addr" style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--dim);">—</span>
+        </span>
+      </label>
+    </div>
+    <div id="liqterm-status" style="font-size:11px;min-height:16px;color:var(--dim);margin-bottom:8px;"></div>
+    <div class="modal-actions">
+      <button class="mbtn mbtn-cancel" onclick="closeModal('modal-liq-term')">cancel</button>
+      <button class="mbtn mbtn-danger" onclick="doLiquidateAndTerminate()">liquidate &amp; terminate</button>
+    </div>
+  </div>
+</div>
+
+<!-- Remove provisioner -->
+<div class="modal-overlay" id="modal-remove">
+  <div class="modal">
+    <div class="modal-title">Remove Provisioner</div>
+    <div class="modal-body" style="margin-bottom:12px;">Auto-detects stake status: active → liquidate+terminate first; maturing/inactive with stake → deactivate first. Then removes from pool contract. Cannot be undone.</div>
+    <input class="modal-input" id="remove-prov-addr" type="text" placeholder="Provisioner staking address (base58)">
+    <input class="modal-input" id="remove-prov-idx" type="number" placeholder="Provisioner index (0 or 1) — for status auto-detection" min="0" max="1" style="margin-top:8px;">
+    <div id="remove-status" style="font-size:11px;min-height:16px;color:var(--dim);margin-top:8px;margin-bottom:8px;"></div>
+    <div class="modal-actions">
+      <button class="mbtn mbtn-cancel" onclick="closeModal('modal-remove')">cancel</button>
+      <button class="mbtn mbtn-danger" onclick="doRemoveProvisioner()">remove provisioner</button>
+    </div>
+  </div>
+</div>
+
+<!-- Withdraw rewards -->
+<div class="modal-overlay" id="modal-withdraw-rewards">
+  <div class="modal">
+    <div class="modal-title">Withdraw Operator Rewards</div>
+    <div class="modal-body">Queries operator balance, then withdraws floor(balance) DUSK (fractional DUSK ignored).</div>
+    <input class="modal-input" id="withdraw-op-addr" type="text" placeholder="Operator address (base58 BLS public key)">
+    <div class="modal-actions">
+      <button class="mbtn mbtn-cancel" onclick="closeModal('modal-withdraw-rewards')">cancel</button>
+      <button class="mbtn mbtn-confirm" onclick="doWithdrawRewards()">withdraw</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── CONFIG ───────────────────────────────────────────────────────────────────
+const API = "http://localhost:7373"
+
+// ── PASSWORD ──────────────────────────────────────────────────────────────────
+function getPassword() {
+  return document.getElementById('wallet-password')?.value || ''
+}
+
+function openPwModal() {
+  document.getElementById('pw-modal').classList.add('open')
+  setTimeout(() => document.getElementById('wallet-password')?.focus(), 50)
+}
+
+function confirmPassword() {
+  const pw = document.getElementById('wallet-password')?.value || ''
+  const dot = document.getElementById('pw-indicator')
+  const lbl = document.getElementById('pw-nav-label')
+  if (pw) {
+    dot.style.background = 'var(--green)'
+    dot.style.boxShadow = '0 0 5px var(--green)'
+    lbl.textContent = 'password set'
+    document.getElementById('pw-nav-btn').style.borderColor = 'var(--green)'
+    document.getElementById('pw-nav-btn').style.color = 'var(--green)'
+  } else {
+    dot.style.background = 'var(--dim)'
+    dot.style.boxShadow = 'none'
+    lbl.textContent = 'set password'
+    document.getElementById('pw-nav-btn').style.borderColor = 'var(--border)'
+    document.getElementById('pw-nav-btn').style.color = 'var(--muted)'
+  }
+  closeModal('pw-modal')
+  if (pw) _updateOwnPrefixes()  // fetch provisioner addresses now that password is available
+}
+
+
+// ── CLOCK ────────────────────────────────────────────────────────────────────
+setInterval(() => {
+  document.getElementById('clock').textContent =
+    new Date().toLocaleTimeString('en-GB', {hour12:false})
+}, 1000)
+
+// ── API HEALTH ────────────────────────────────────────────────────────────────
+async function checkApi() {
+  try {
+    const r = await fetch(`${API}/api/ping`, {signal: AbortSignal.timeout(3000)})
+    const ok = r.ok
+    document.getElementById('api-dot').className = ok ? 'dot dot-green dot-pulse' : 'dot dot-red'
+    document.getElementById('api-status').textContent = ok ? 'api ok' : 'api down'
+  } catch {
+    document.getElementById('api-dot').className = 'dot dot-red'
+    document.getElementById('api-status').textContent = 'api offline'
+  }
+}
+checkApi()
+setInterval(checkApi, 15000)
+
+// ── TIP HEIGHT ────────────────────────────────────────────────────────────────
+async function updateTip() {
+  try {
+    const r = await fetch(`${API}/api/network/tip`)
+    const d = await r.json()
+    if (d.ok) document.getElementById('tip-val').textContent = `blk ${d.height.toLocaleString()}`
+  } catch {}
+}
+updateTip()
+setInterval(updateTip, 8000)
+
+// ── OUTPUT PANEL ──────────────────────────────────────────────────────────────
+function clearOutput() {
+  const b = document.getElementById('output-body')
+  b.innerHTML = '<div class="cmd-welcome"><div style="color:var(--dim)">cleared</div></div>'
+}
+
+function addPending(name) {
+  const b = document.getElementById('output-body')
+  // remove welcome if present
+  b.querySelector('.cmd-welcome')?.remove()
+
+  const block = document.createElement('div')
+  block.className = 'cmd-block'
+  block.id = `pending-${Date.now()}`
+  block.innerHTML = `
+    <div class="cmd-meta">
+      <span class="cmd-ts">${new Date().toLocaleTimeString('en-GB',{hour12:false})}</span>
+      <span class="cmd-name">${name}</span>
+    </div>
+    <div class="cmd-output"><span class="cmd-spinner"></span>running…</div>
+  `
+  b.prepend(block)
+  return block
+}
+
+function resolveBlock(block, result, label) {
+  const out = block.querySelector('.cmd-output')
+  const meta = block.querySelector('.cmd-meta')
+
+  // add duration
+  const dur = document.createElement('span')
+  dur.className = 'cmd-dur'
+  dur.textContent = result.duration_ms ? `${result.duration_ms}ms` : ''
+  meta.appendChild(dur)
+
+  // Combine stdout + stderr so messages like "A stake does not exist" (sent to stderr)
+  // are always visible alongside stdout content
+  const combined = [result.stdout, result.stderr].filter(Boolean).join('\n').trim()
+  const text = combined || JSON.stringify(result, null, 2)
+  out.className = `cmd-output ${result.ok ? 'ok' : 'err'}`
+  out.innerHTML = ''
+  out.textContent = text
+}
+
+// Wallet API routes that require a password
+const WALLET_ROUTES = ['/api/balance', '/api/profiles', '/api/stake_info', '/api/stake', '/api/unstake', '/api/withdraw_reward']
+
+async function runCmd(name, url, opts = {}) {
+  const pw = getPassword()
+
+  // Guard: warn if wallet command but no password set
+  const needsPassword = WALLET_ROUTES.some(r => url.includes(r))
+  if (needsPassword && !pw) {
+    const block = addPending(name)
+    resolveBlock(block, {
+      ok: false, stdout: '',
+      stderr: 'No wallet password entered. Type your password in the field at the top left before running wallet commands.',
+      duration_ms: 0, cmd: url, ts: new Date().toISOString()
+    }, name)
+    return
+  }
+
+  const block = addPending(name)
+
+  // Inject password into request body for all calls
+  const existing = opts.body ? JSON.parse(opts.body) : {}
+  opts = {
+    ...opts,
+    method: opts.method || 'POST',
+    headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
+    body: JSON.stringify({ ...existing, ...(pw ? { password: pw } : {}) }),
+  }
+
+  try {
+    const r = await fetch(url, opts)
+    const data = await r.json()
+    resolveBlock(block, data, name)
+  } catch(e) {
+    resolveBlock(block, {ok:false, stdout:'', stderr:String(e), duration_ms:0}, name)
+  }
+}
+
+// ── COMMANDS ──────────────────────────────────────────────────────────────────
+async function cmdStakeInfoAll() {
+  const pw = getPassword()
+  if (!pw) {
+    const block = addPending('stake_info_all')
+    resolveBlock(block, {ok:false, stdout:'', stderr:'No wallet password entered.', duration_ms:0, ts:new Date().toISOString()}, 'stake_info_all')
+    return
+  }
+  const block = addPending('stake_info_all')
+  try {
+    const r = await fetch(`${API}/api/stake_info_all`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({password: pw})
+    })
+    const data = await r.json()
+    let combined = ''
+    for (const [idx, res] of Object.entries(data)) {
+      combined += `── Node ${idx} ──────────────────────\n`
+      combined += ([res.stdout, res.stderr].filter(Boolean).join('\n') || 'no output') + '\n\n'
+    }
+    const ok = Object.values(data).some(d => d.ok)
+    resolveBlock(block, {ok, stdout: combined.trim(), duration_ms: Math.max(...Object.values(data).map(d=>d.duration_ms||0))}, 'stake_info_all')
+  } catch(e) {
+    resolveBlock(block, {ok:false, stdout:'', stderr:String(e), duration_ms:0}, 'stake_info_all')
+  }
+}
+
+function cmdBalance()       { runCmd('balance',      `${API}/api/balance`) }
+function cmdProfiles()      { runCmd('profiles',     `${API}/api/profiles`) }
+
+async function cmdContractBalance() {
+  const block = addPending('pool_contract_balance')
+  try {
+    const r = await fetch(`${API}/api/sozu/contract_balance`)
+    const d = await r.json()
+    const text = d.ok
+      ? `LUX:  ${d.lux.toLocaleString()}\nDUSK: ${d.dusk.toLocaleString(undefined,{minimumFractionDigits:9})}`
+      : (d.raw || d.stderr)
+    resolveBlock(block, {ok:d.ok, stdout:text, duration_ms:0}, 'pool_contract_balance')
+  } catch(e) {
+    resolveBlock(block, {ok:false, stdout:'', stderr:String(e), duration_ms:0}, 'pool_contract_balance')
+  }
+}
+
+async function cmdExchangeRate() {
+  const block = addPending('exchange_rate')
+  try {
+    const r = await fetch(`${API}/api/sozu/exchange_rate`)
+    const d = await r.json()
+    const text = d.ok
+      ? `numerator:   ${d.numerator}\ndenominator: ${d.denominator}\nrate:        ${d.rate}\n\n${d.meaning}`
+      : d.stderr
+    resolveBlock(block, {ok:d.ok, stdout:text, duration_ms:0}, 'exchange_rate')
+  } catch(e) {
+    resolveBlock(block, {ok:false, stdout:'', stderr:String(e), duration_ms:0}, 'exchange_rate')
+  }
+}
+
+// ── MODALS ────────────────────────────────────────────────────────────────────
+function openStakeModal()    { document.getElementById('stake-modal').classList.add('open') }
+function openUnstakeModal()  { document.getElementById('unstake-modal').classList.add('open') }
+function openWithdrawModal() { document.getElementById('withdraw-modal').classList.add('open') }
+function closeModal(id)      { document.getElementById(id).classList.remove('open') }
+
+// ── LIVE PROVISIONER PANEL ───────────────────────────────────────────────────
+
+function renderNodeCard(idx, node, container) {
+  if (!container) return
+  const s      = node.status || 'inactive'
+  const amount = node.amount_dusk
+    ? Number(node.amount_dusk).toLocaleString('en-US', {maximumFractionDigits: 2}) + ' DUSK'
+    : '— DUSK'
+  const slashed = node.slashed_dusk && node.slashed_dusk > 0
+    ? Number(node.slashed_dusk).toLocaleString('en-US', {maximumFractionDigits: 2}) + ' DUSK'
+    : null
+  const transitions = (node.transitions !== null && node.transitions !== undefined)
+    ? node.transitions : '—'
+
+  // Use server-computed label: "active (3 trans)" / "maturing (1 trans)" / "inactive (0 trans)"
+  const statusLabel = (node.status_label || s).replace('active','● active')
+                                               .replace('maturing','◑ maturing')
+                                               .replace('inactive','○ inactive')
+  const activeBlock = node.active_block
+    ? `block #${node.active_block.toLocaleString()} (epoch ${node.active_epoch})`
+    : null
+  const noData = !node.has_stake && !node.ok
+
+  container.innerHTML = `
+    <div class="prov-card">
+      <div class="prov-status ${s}">${statusLabel}</div>
+      <div class="prov-row"><span>Eligible Stake</span><span>${amount}</span></div>
+      ${slashed ? `<div class="prov-row"><span>Slashed (reclaimable)</span><span style="color:var(--orange)">${slashed}</span></div>` : ''}
+      ${activeBlock && s !== 'active' ? `<div class="prov-row"><span>Active from</span><span style="color:var(--cyan)">${activeBlock}</span></div>` : ''}
+    </div>
+    ${noData ? '<div style="font-size:10px;color:var(--dim);padding:2px 0">set password to load stake data</div>' : ''}
+  `
+}
+
+function updateLivePanel(data) {
+  const epochChip = document.getElementById('epoch-chip')
+  const countdown = document.getElementById('epoch-countdown')
+  const dot       = document.getElementById('live-dot')
+  if (data.epoch !== null && data.epoch !== undefined) {
+    epochChip.textContent = `epoch ${data.epoch}`
+    const blk = data.blocks_until_transition
+    countdown.textContent = blk !== null ? `${blk.toLocaleString()} blk` : '—'
+    dot.style.background = 'var(--green)'
+    dot.style.boxShadow  = '0 0 5px var(--green)'
+  }
+  const nodes = data.nodes || {}
+  renderNodeCard(0, nodes['0'] || {status:'inactive', has_stake:false, ok:false},
+                 document.getElementById('node0-body'))
+  renderNodeCard(1, nodes['1'] || {status:'inactive', has_stake:false, ok:false},
+                 document.getElementById('node1-body'))
+}
+
+async function cmdRecycle() {
+  const block = addPending('recycle')
+  try {
+    const r = await fetch(`${API}/api/sozu/recycle`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({password: getPassword()})
+    })
+    const d = await r.json()
+    resolveBlock(block, {ok: d.ok, stdout: d.stdout || d.stderr || JSON.stringify(d),
+                         stderr: d.stderr, duration_ms: d.duration_ms}, 'recycle')
+  } catch(e) {
+    resolveBlock(block, {ok: false, stdout: '', stderr: String(e), duration_ms: 0}, 'recycle')
+  }
+}
+
+async function fetchLivePanel() {
+  try {
+    const pw  = getPassword()
+    // Always POST — password goes in JSON body, never in URL
+    const r   = await fetch(`${API}/api/provisioner/live`, {
+      method:  'POST',
+      headers: {'Content-Type': 'application/json'},
+      body:    JSON.stringify(pw ? {password: pw} : {}),
+    })
+    const d   = await r.json()
+    updateLivePanel(d)
+  } catch(e) {
+    const dot = document.getElementById('live-dot')
+    if (dot) { dot.style.background = 'var(--red)'; dot.style.boxShadow = 'none' }
+  }
+}
+
+// Fetch on load and refresh every 15s
+fetchLivePanel()
+setInterval(fetchLivePanel, 15000)
+
+// ── CONFIGURATION ─────────────────────────────────────────────────────────────
+
+let _cfg = {}
+
+async function loadConfig() {
+  try {
+    const r = await fetch(`${API}/api/config`)
+    _cfg = await r.json()
+    document.getElementById('cfg-network-id').value   = _cfg.network_id ?? 2
+    document.getElementById('cfg-contract').value     = _cfg.contract_address ?? ''
+    document.getElementById('cfg-operator').value     = _cfg.operator_address ?? ''
+    document.getElementById('cfg-prov0-addr').value  = _cfg.prov_0_address || ''
+    document.getElementById('cfg-prov1-addr').value  = _cfg.prov_1_address || ''
+    document.getElementById('cfg-stake-limit').value    = _cfg.operator_stake_limit ?? 3000000
+    document.getElementById('cfg-max-slash-pct').value  = _cfg.max_slash_pct != null ? (_cfg.max_slash_pct * 100).toFixed(1) : '2.0'
+    document.getElementById('cfg-rotation').value     = _cfg.rotation_window ?? 100
+    document.getElementById('cfg-snatch').value       = _cfg.snatch_window ?? 50
+    document.getElementById('cfg-backfill').value     = _cfg.backfill_blocks ?? 200
+    // Rotation config fields
+    if (document.getElementById('cfg-prov0-sk')) {
+      document.getElementById('cfg-prov0-sk').value    = ''  // never pre-fill SK
+      document.getElementById('cfg-prov1-sk').value    = ''
+      document.getElementById('cfg-seed-dusk').value   = _cfg.rotation_seed_dusk ?? 1000
+      // SK set indicators
+      const sk0status = document.getElementById('cfg-prov0-sk-status')
+      const sk1status = document.getElementById('cfg-prov1-sk-status')
+      if (sk0status) sk0status.textContent = _cfg.prov_0_sk_set ? '✓ set' : 'not set'
+      if (sk0status) sk0status.style.color = _cfg.prov_0_sk_set ? 'var(--green)' : 'var(--dim)'
+      if (sk1status) sk1status.textContent = _cfg.prov_1_sk_set ? '✓ set' : 'not set'
+      if (sk1status) sk1status.style.color = _cfg.prov_1_sk_set ? 'var(--green)' : 'var(--dim)'
+      // Auto-detect provisioner addresses from wallet
+      fetch(`${API}/api/provisioner/addresses`, {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({password: getPassword()})
+      }).then(r=>r.json()).then(d=>{
+        const a0 = d.addresses?.['0'] || ''
+        const a1 = d.addresses?.['1'] || ''
+        const d0 = document.getElementById('cfg-prov0-addr-display')
+        const d1 = document.getElementById('cfg-prov1-addr-display')
+        if (d0) d0.textContent = a0 ? a0.slice(0,12)+'…'+a0.slice(-6) : '—'
+        if (d1) d1.textContent = a1 ? a1.slice(0,12)+'…'+a1.slice(-6) : '—'
+        // Update own prefixes with fresh addresses
+        const allAddrs2 = [d.operator, a0, a1].filter(Boolean)
+        _ownPrefixes = [...new Set(allAddrs2.map(a=>a.slice(0,8)).filter(p=>p.length===8))]
+      }).catch(()=>{})
+    }
+    _updateOwnPrefixes()
+    // Show/hide warning banner
+    const warn = document.getElementById('config-warning')
+    if (warn) {
+      const incomplete = !_cfg.contract_address || !_cfg.operator_address
+        || _cfg.contract_address.length < 10 || _cfg.operator_address.length < 10
+      warn.style.display = incomplete ? 'block' : 'none'
+    }
+  } catch(e) {
+    console.error('Failed to load config', e)
+  }
+}
+
+async function saveConfig() {
+  const payload = {
+    network_id:           parseInt(document.getElementById('cfg-network-id').value),
+    contract_address:     document.getElementById('cfg-contract').value.trim(),
+    operator_address:     document.getElementById('cfg-operator').value.trim(),
+    prov_0_address:       document.getElementById('cfg-prov0-addr').value.trim(),
+    prov_1_address:       document.getElementById('cfg-prov1-addr').value.trim(),
+    operator_stake_limit: parseFloat(document.getElementById('cfg-stake-limit').value),
+    max_slash_pct:        parseFloat(document.getElementById('cfg-max-slash-pct').value || '2'),
+    rotation_window:      parseInt(document.getElementById('cfg-rotation').value),
+    snatch_window:        parseInt(document.getElementById('cfg-snatch').value),
+    backfill_blocks:      parseInt(document.getElementById('cfg-backfill').value),
+    rotation_seed_dusk:   parseFloat(document.getElementById('cfg-seed-dusk').value),
+  }
+  try {
+    const sk0 = document.getElementById('cfg-prov0-sk')?.value.trim()
+    const sk1 = document.getElementById('cfg-prov1-sk')?.value.trim()
+    if (sk0) payload.prov_0_sk = sk0
+    if (sk1) payload.prov_1_sk = sk1
+    const r = await fetch(`${API}/api/config`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    })
+    const d = await r.json()
+    if (d.ok) {
+      _cfg = d.config
+      const s = document.getElementById('cfg-status')
+      s.textContent = '✓ Saved'
+      s.style.color = 'var(--green)'
+      setTimeout(() => { s.textContent = '' }, 2500)
+    }
+  } catch(e) {
+    const s = document.getElementById('cfg-status')
+    s.textContent = '✗ Save failed: ' + e.message
+    s.style.color = 'var(--red)'
+  }
+}
+
+async function resetConfig() {
+  if (!confirm('Reset all configuration to defaults?')) return
+  try {
+    const r = await fetch(`${API}/api/config/reset`, {method:'POST'})
+    const d = await r.json()
+    if (d.ok) {
+      _cfg = d.config
+      loadConfig()
+      const s = document.getElementById('cfg-status')
+      s.textContent = '✓ Reset to defaults'
+      s.style.color = 'var(--yellow)'
+      setTimeout(() => { s.textContent = '' }, 2500)
+    }
+  } catch(e) {}
+}
+
+// ── MODAL HELPERS ────────────────────────────────────────────────────────────
+function openModal(id) {
+  document.getElementById(id)?.classList.add('open')
+  if (id === 'modal-config')      loadConfig()
+  if (id === 'modal-alloc-stake') _populateAllocModal()
+  if (id === 'modal-deactivate')  _populateAddrModal('deact')
+  if (id === 'modal-liq-term')    _populateAddrModal('liqterm')
+}
+
+document.addEventListener('click', e => {
+  if (e.target.classList.contains('modal-overlay')) e.target.classList.remove('open')
+})
+
+// Initial load — populate config fields, set backfill default, warn if incomplete
+loadConfig().then(() => {
+  // Set backfill input to value from config (default 200)
+  const bfInput = document.getElementById('backfill-n')
+  if (bfInput && _cfg.backfill_blocks) bfInput.value = _cfg.backfill_blocks
+  _updateOwnPrefixes()
+
+  const missing = []
+  if (!_cfg.contract_address || _cfg.contract_address.length < 10)
+    missing.push('Contract Address')
+  if (!_cfg.operator_address || _cfg.operator_address.length < 10)
+    missing.push('Operator Address')
+  if (missing.length > 0) {
+    openModal('modal-config')
+    const status = document.getElementById('cfg-status')
+    status.style.color = 'var(--yellow)'
+    status.textContent = `⚠ Please configure: ${missing.join(', ')}`
+  }
+})
+
+function pw() { return getPassword() }
+
+function provAction(name, url, body) {
+  closeModal(document.querySelector('.modal-overlay.open')?.id || '')
+  return runCmd(name, `${API}${url}`, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({...body, password: pw()})
+  })
+}
+
+// ── INFO COMMANDS ─────────────────────────────────────────────────────────────
+function cmdListProvisioners() { runCmd('list_provisioners', `${API}/api/provisioner/list`) }
+
+// ── ACTION HANDLERS ───────────────────────────────────────────────────────────
+async function doAddProvisioner() {
+  const op   = document.getElementById('add-prov-op').value.trim()
+  const prov = document.getElementById('add-prov-addr').value.trim()
+  if (!op || !prov) return
+  provAction('add_provisioner', '/api/provisioner/add_provisioner',
+    {operator_address: op, provisioner_address: prov})
+}
+
+async function _populateAllocModal() {
+  // Fill in live stake status and address for each provisioner
+  const cfg_r = await fetch(`${API}/api/config`).then(r=>r.json()).catch(()=>({}))
+  const addr_r = await fetch(`${API}/api/provisioner/addresses`,{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({password:getPassword()})}).then(r=>r.json()).catch(()=>({}))
+  const live_r = await fetch(`${API}/api/provisioner/live`,{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({password:getPassword()})}).then(r=>r.json()).catch(()=>({}))
+
+  for (const idx of [0,1]) {
+    const addr  = addr_r.addresses?.[String(idx)] || ''
+    const short = addr ? addr.slice(0,10)+'…'+addr.slice(-6) : '—'
+    const node  = live_r.nodes?.[String(idx)] || {}
+    const stake = node.amount_dusk ? `${(node.amount_dusk/1e6).toFixed(2)}M DUSK` : ''
+    const status= node.status_label || ''
+    const skSet = cfg_r[`prov_${idx}_sk_set`]
+
+    document.getElementById(`alloc-prov${idx}-addr`).textContent     = short
+    document.getElementById(`alloc-prov${idx}-status`).textContent    = status ? `(${status}${stake ? ' · '+stake : ''})` : ''
+    const skEl = document.getElementById(`alloc-prov${idx}-sk-indicator`)
+    skEl.textContent  = skSet ? '✓ SK' : 'no SK'
+    skEl.style.color  = skSet ? 'var(--green)' : 'var(--red)'
+    // Disable checkbox if no SK stored
+    const cb = document.getElementById(`alloc-check-${idx}`)
+    cb.disabled = !skSet
+    const lbl = document.getElementById(`alloc-prov${idx}-label`)
+    lbl.style.opacity = skSet ? '1' : '0.45'
+    lbl.style.cursor  = skSet ? 'pointer' : 'not-allowed'
+  }
+}
+
+async function doAllocateStake() {
+  const amt = parseFloat(document.getElementById('alloc-amt').value)
+  if (!amt || amt < 1) {
+    document.getElementById('alloc-status').textContent = 'Enter an amount ≥ 1 DUSK'
+    return
+  }
+  const checked = [0,1].filter(i => document.getElementById(`alloc-check-${i}`)?.checked)
+  if (checked.length === 0) {
+    document.getElementById('alloc-status').textContent = 'Select at least one provisioner'
+    return
+  }
+  document.getElementById('alloc-status').textContent = `Staking ${amt} DUSK into ${checked.length} provisioner(s)…`
+  for (const idx of checked) {
+    await provAction(`allocate_stake prov[${idx}] ${amt} DUSK`,
+      '/api/provisioner/allocate_stake',
+      {provisioner_idx: idx, amount_dusk: amt})
+  }
+  document.getElementById('alloc-status').textContent = 'Done'
+}
+
+// Populate radio-button modals with live provisioner data
+// prefix = 'deact' | 'liqterm' | 'remove'
+async function _populateAddrModal(prefix) {
+  const live_r = await fetch(`${API}/api/provisioner/live`, {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({password: getPassword()})
+  }).then(r=>r.json()).catch(()=>({}))
+
+  for (const idx of [0, 1]) {
+    const node   = live_r.nodes?.[String(idx)] || {}
+    const addr   = node.staking_address || ''
+    const short  = addr ? addr.slice(0,10)+'…'+addr.slice(-6) : '—'
+    const stake  = node.amount_dusk ? `${(node.amount_dusk/1e6).toFixed(2)}M DUSK` : ''
+    const status = node.status_label || ''
+
+    const addrEl = document.getElementById(`${prefix}-prov${idx}-addr`)
+    if (addrEl) {
+      addrEl.textContent  = short
+      addrEl.dataset.full = addr
+    }
+    const statusEl = document.getElementById(`${prefix}-prov${idx}-status`)
+    if (statusEl) statusEl.textContent = status ? `(${status}${stake ? ' · '+stake : ''})` : ''
+  }
+}
+
+async function doDeactivateStake() {
+  const sel = document.querySelector('input[name="deact-prov"]:checked')
+  if (!sel) { document.getElementById('deact-status').textContent = 'Select a provisioner'; return }
+  const idx  = parseInt(sel.value)
+  const addr = document.getElementById(`deact-prov${idx}-addr`).dataset.full || ''
+  if (!addr) { document.getElementById('deact-status').textContent = 'No address — run stake info first'; return }
+  document.getElementById('deact-status').textContent = `Deactivating prov[${idx}]…`
+  provAction(`deactivate_stake prov[${idx}]`, '/api/provisioner/deactivate_stake',
+    {provisioner_address: addr})
+}
+
+
+async function doLiquidateAndTerminate() {
+  const sel = document.querySelector('input[name="liqterm-prov"]:checked')
+  if (!sel) { document.getElementById('liqterm-status').textContent = 'Select a provisioner'; return }
+  const idx  = parseInt(sel.value)
+  const addr = document.getElementById(`liqterm-prov${idx}-addr`).dataset.full || ''
+  if (!addr) { document.getElementById('liqterm-status').textContent = 'No address — run stake info first'; return }
+  document.getElementById('liqterm-status').textContent = `Liquidating & terminating prov[${idx}]…`
+  provAction(`liquidate_terminate prov[${idx}]`, '/api/provisioner/liquidate_terminate',
+    {provisioner_address: addr})
+}
+
+async function doRemoveProvisioner() {
+  const addr   = document.getElementById('remove-prov-addr').value.trim()
+  const idxRaw = document.getElementById('remove-prov-idx').value.trim()
+  const idx    = idxRaw !== '' ? parseInt(idxRaw) : null
+  const op     = _cfg?.operator_address || ''
+  if (!addr) { document.getElementById('remove-status').textContent = 'Enter provisioner address'; return }
+  if (!op)   { document.getElementById('remove-status').textContent = 'Operator address not set in config'; return }
+  document.getElementById('remove-status').textContent = 'Removing (auto-detecting status)…'
+  const body = {provisioner_address: addr, operator_address: op}
+  if (idx !== null && !isNaN(idx)) body.provisioner_idx = idx
+  provAction('remove_provisioner', '/api/provisioner/remove_provisioner', body)
+}
+
+async function doWithdrawRewards() {
+  const op = document.getElementById('withdraw-op-addr').value.trim()
+  if (!op) return
+  provAction('withdraw_operator_rewards', '/api/provisioner/withdraw_rewards',
+    {operator_address: op})
+}
+
+// ── ROTATION MANAGER ─────────────────────────────────────────────────────────
+const ROT_STATE_COLORS = {
+  idle:       'var(--dim)',
+  waiting:    'var(--cyan)',
+  rotating:   'var(--yellow)',
+  snatching:  'var(--yellow)',
+  recovering: 'var(--orange, #f0a050)',
+  error:      'var(--red)',
+  disabled:   'var(--dim)',
+}
+
+let _rotEnabled = false
+
+async function toggleRotation() {
+  const btn = document.getElementById('rot-toggle')
+  const endpoint = _rotEnabled ? '/api/rotation/disable' : '/api/rotation/enable'
+  try {
+    await fetch(`${API}${endpoint}`, {method:'POST'})
+    await pollRotationStatus()
+  } catch(e) {
+    console.error('rotation toggle failed', e)
+  }
+}
+
+function renderRotationStatus(st) {
+  _rotEnabled = !!st.enabled
+  const dot   = document.getElementById('rot-dot')
+  const state = document.getElementById('rot-state')
+  const step  = document.getElementById('rot-step')
+  const btn   = document.getElementById('rot-toggle')
+  const log   = document.getElementById('rot-log')
+  if (!dot) return
+
+  const dispState = _rotEnabled ? (st.state || 'idle') : 'disabled'
+  const col = ROT_STATE_COLORS[dispState] || 'var(--text)'
+  dot.style.background = col
+  state.style.color    = col
+  state.textContent    = dispState
+  step.textContent     = st.step || ''
+  // Toggle switch visual state
+  const track = document.getElementById('rot-toggle-track')
+  const thumb = document.getElementById('rot-toggle-thumb')
+  if (track && thumb) {
+    if (_rotEnabled) {
+      track.style.background   = 'rgba(45,212,184,.2)'
+      track.style.borderColor  = 'var(--teal)'
+      thumb.style.transform    = 'translateX(15px)'
+      thumb.style.background   = 'var(--teal)'
+    } else {
+      track.style.background   = 'var(--bg3)'
+      track.style.borderColor  = 'var(--border)'
+      thumb.style.transform    = 'translateX(0)'
+      thumb.style.background   = 'var(--dim)'
+    }
+  }
+
+  if (st.log && st.log.length > 0) {
+    log.innerHTML = st.log.map(e => {
+      const lvlColor = e.level === 'error' ? 'var(--red)' :
+                       e.level === 'warn'  ? 'var(--yellow)' : 'var(--dim)'
+      return `<div><span style="color:var(--muted)">${e.ts}</span> ` +
+             `<span style="color:${lvlColor}">${e.msg}</span></div>`
+    }).join('')
+  }
+}
+
+async function pollRotationStatus() {
+  try {
+    const r = await fetch(`${API}/api/rotation/status`)
+    const st = await r.json()
+    renderRotationStatus(st)
+  } catch(e) {}
+}
+
+// Poll rotation status every 10s
+setInterval(pollRotationStatus, 10000)
+pollRotationStatus()
+
+// ── SOZU EVENT STREAM ─────────────────────────────────────────────────────────
+async function togglePollerErrors() {
+  const panel = document.getElementById('poller-errors-panel')
+  const btn   = document.getElementById('errors-btn')
+  if (panel.style.display === 'none') {
+    try {
+      const r = await fetch(`${API}/api/events/errors`)
+      const d = await r.json()
+      const errs = Array.isArray(d) ? d : (d.errors || [])
+      const body = document.getElementById('poller-errors-body')
+      if (errs.length === 0) {
+        body.textContent = 'no errors'
+        body.style.color = 'var(--green)'
+      } else {
+        body.style.color = 'var(--red)'
+        body.innerHTML = errs.slice(-20).map(e =>
+          `<div style="margin-bottom:2px;">[${e.ts?.slice(11,19)||'?'}] blk=${e.block||'?'} ${e.error}</div>`
+        ).join('')
+      }
+    } catch(err) {
+      document.getElementById('poller-errors-body').textContent = 'fetch failed: ' + err.message
+    }
+    panel.style.display = 'block'
+    btn.style.color = 'var(--yellow)'
+  } else {
+    panel.style.display = 'none'
+    btn.style.color = 'var(--dim)'
+  }
+}
+
+async function doBackfill() {
+  const n = parseInt(document.getElementById('backfill-n')?.value || '100')
+  const btn = document.querySelector('[onclick="doBackfill()"]')
+  if (btn) { btn.textContent = 'scanning…'; btn.disabled = true }
+
+  // Clear DOM and dedup set so backfilled events can re-render via SSE
+  document.getElementById('events-body').innerHTML = ''
+  _seenEvents.clear()
+
+  try {
+    await fetch(`${API}/api/events/backfill`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({blocks: n})
+    })
+  } catch(e) {
+    console.error('backfill error', e)
+    document.getElementById('stream-status').textContent = 'backfill error'
+  } finally {
+    if (btn) { btn.textContent = 'backfill'; btn.disabled = false }
+  }
+}
+
+
+const TOPIC_CLASS = {
+  'activate':           'topic-activate',
+  'deactivate':         'topic-deactivate',
+  'reward-recycle':     'topic-reward-recycle',
+  'reward-terminate':   'topic-reward-terminate',
+  'deposit':            'topic-deposit',
+  'unstake':            'topic-unstake',
+  'liquidate':          'topic-liquidate',
+  'terminate':          'topic-terminate',
+  'add_provisioner':    'topic-add-provisioner',
+  'remove_provisioner': 'topic-remove-provisioner',
+}
+
+function formatDecoded(decoded) {
+  if (!decoded || typeof decoded !== 'object') return String(decoded || '')
+  if (decoded._error) return `[err: ${decoded._error}]`
+  return Object.entries(decoded)
+    .filter(([k]) => !k.startsWith('_'))
+    .map(([k,v]) => {
+      let vs = typeof v === 'object' ? JSON.stringify(v) : String(v)
+      if (vs.length > 60) vs = vs.slice(0,30) + '…' + vs.slice(-10)
+      return `${k}=${vs}`
+    })
+    .join('  ')
+}
+
+let eventsSeenBlocks = new Set()
+let eventsFirstLoad = true
+
+function _eventContainsOwnAddr(entry) {
+  // Search both decoded JSON and raw data hex — addresses are 100+ chars
+  // and may not decode for unknown topics
+  if (!_ownPrefixes.length) return false
+  const haystack = JSON.stringify(entry.decoded || '') + (entry.data || '')
+  return _ownPrefixes.some(p => haystack.includes(p))
+}
+
+function _rehighlightAll() {
+  // Re-scan all rendered rows now that _ownPrefixes is populated
+  const rows = document.querySelectorAll('#events-body .event-row')
+  rows.forEach(row => {
+    const haystack = row.dataset.haystack || ''
+    if (_ownPrefixes.length && _ownPrefixes.some(p => haystack.includes(p))) {
+      row.classList.add('ev-mine')
+    } else {
+      row.classList.remove('ev-mine')
+    }
+  })
+}
+
+function renderEvent(entry) {
+  const body = document.getElementById('events-body')
+  body.querySelector('.ev-empty')?.remove()
+
+  const row = document.createElement('div')
+  row.className = 'event-row'
+  row.dataset.height = entry.height
+  // Store full searchable content for later re-highlight when prefixes arrive
+  row.dataset.haystack = JSON.stringify(entry.decoded || '') + (entry.data || '')
+  const cls = TOPIC_CLASS[entry.topic] || 'topic-default'
+  const dataStr = formatDecoded(entry.decoded)
+  if (_eventContainsOwnAddr(entry)) {
+    row.classList.add('ev-mine')
+  }
+  row.innerHTML = `
+    <span class="ev-ts">${entry.ts}</span>
+    <span class="ev-block">${entry.height.toLocaleString()}</span>
+    <span class="ev-topic ${cls}">${entry.topic}</span>
+    <span class="ev-data">${dataStr}</span>
+  `
+  // Insert in descending block-height order
+  let inserted = false
+  for (const child of body.children) {
+    const childH = parseInt(child.dataset.height || '0')
+    if (entry.height >= childH) {
+      body.insertBefore(row, child)
+      inserted = true
+      break
+    }
+  }
+  if (!inserted) body.appendChild(row)
+  // keep max 200 rows
+  while (body.children.length > 200) body.removeChild(body.lastChild)
+}
+
+function connectEventStream() {
+  const dot    = document.getElementById('stream-dot')
+  const status = document.getElementById('stream-status')
+
+  const evtSource = new EventSource(`${API}/api/events/stream`)
+
+  evtSource.onopen = () => {
+    dot.className = 'dot dot-green dot-pulse'
+    status.textContent = 'live'
+  }
+
+  evtSource.onmessage = e => {
+    try {
+      const entry = JSON.parse(e.data)
+      const key = `${entry.height}:${entry.topic}:${JSON.stringify(entry.decoded)}`
+      if (!_seenEvents.has(key)) {
+        _seenEvents.add(key)
+        renderEvent(entry)
+      }
+    } catch {}
+  }
+
+  evtSource.onerror = () => {
+    dot.className = 'dot dot-red'
+    status.textContent = 'reconnecting…'
+    evtSource.close()
+    setTimeout(connectEventStream, 5000)
+  }
+}
+
+// Dedup set shared between history and SSE stream
+const _seenEvents = new Set()
+
+let _ownPrefixes = []
+async function _updateOwnPrefixes() {
+  // Collect: operator from config + provisioner addresses (config-stored + live stake-info)
+  const allAddrs = []
+  const op = _cfg?.operator_address || ''
+  if (op) allAddrs.push(op)
+  if (_cfg?.prov_0_address) allAddrs.push(_cfg.prov_0_address)
+  if (_cfg?.prov_1_address) allAddrs.push(_cfg.prov_1_address)
+  try {
+    const d = await fetch(`${API}/api/provisioner/addresses`, {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({password: getPassword()})}).then(r=>r.json())
+    Object.values(d.addresses || {}).filter(Boolean).forEach(a => allAddrs.push(a))
+  } catch(e) {}
+  _ownPrefixes = [...new Set(allAddrs.filter(Boolean).map(a => a.slice(0,8)).filter(p => p.length === 8))]
+  _rehighlightAll()
+}
+
+// ── Background command log polling ───────────────────────────────────────────
+// Polls /api/rotation/cmd_log every 15s and injects new entries into the
+// Command Output panel as if they were manually issued commands.
+let _cmdLogLastIdx = -1
+
+async function _pollCmdLog() {
+  try {
+    const r = await fetch(`${API}/api/rotation/cmd_log?after=${_cmdLogLastIdx}`)
+    const d = await r.json()
+    if (!d.entries || d.entries.length === 0) return
+    const body = document.getElementById('output-body')
+    body.querySelector('.cmd-welcome')?.remove()
+    d.entries.forEach(entry => {
+      const block = document.createElement('div')
+      block.className = 'cmd-block'
+      block.innerHTML = `
+        <div class="cmd-meta">
+          <span class="cmd-ts">${entry.ts}</span>
+          <span class="cmd-name" style="color:var(--purple)">${entry.name}</span>
+          <span class="cmd-dur">${entry.duration_ms ? entry.duration_ms + 'ms' : ''}</span>
+        </div>
+        <div class="cmd-output ${entry.ok ? 'ok' : 'err'}">${
+          ([entry.stdout, entry.stderr].filter(Boolean).join('\n').trim()
+            || JSON.stringify(entry))
+        }</div>
+      `
+      body.prepend(block)
+    })
+    _cmdLogLastIdx = d.total - 1
+  } catch(e) {}
+}
+
+setInterval(_pollCmdLog, 15000)
+
+// Fetch own address prefixes FIRST, then load history, then connect SSE
+// This ensures ev-mine highlighting works on initial render
+_updateOwnPrefixes().finally(() => {
+  fetch(`${API}/api/events/history`)
+    .then(r => r.json())
+    .then(events => {
+      ;[...events].reverse().forEach(entry => {
+        const key = `${entry.height}:${entry.topic}:${JSON.stringify(entry.decoded)}`
+        _seenEvents.add(key)
+        renderEvent(entry)
+      })
+    })
+    .catch(() => {})
+    .finally(() => connectEventStream())
+})
+</script>
+
+<!-- Config modal -->
+<div class="modal-overlay" id="modal-config">
+  <div class="modal" style="min-width:520px;max-width:600px;">
+    <div class="modal-title">Dashboard Configuration</div>
+    <div class="modal-body" style="margin-bottom:12px;">Settings are persisted server-side in <code>~/.sozu_dashboard_config.json</code></div>
+
+    <div style="display:grid;grid-template-columns:180px 1fr;gap:8px 12px;align-items:center;">
+      <label style="font-size:11px;color:var(--muted);">Network ID</label>
+      <input class="modal-input" id="cfg-network-id" type="number" style="margin:0;" placeholder="2">
+
+      <label style="font-size:11px;color:var(--muted);">Contract Address</label>
+      <input class="modal-input" id="cfg-contract" type="text" style="margin:0;" placeholder="72883945ac1aa032a…">
+
+      <label style="font-size:11px;color:var(--muted);">Operator Address</label>
+      <input class="modal-input" id="cfg-operator" type="text" style="margin:0;" placeholder="BLS public key (base58)">
+
+      <label style="font-size:11px;color:var(--muted);">Provisioner 0 Address<br><span style="font-size:10px;color:var(--dim)">for event highlighting</span></label>
+      <input class="modal-input" id="cfg-prov0-addr" type="text" style="margin:0;" placeholder="Staking address (base58)">
+
+      <label style="font-size:11px;color:var(--muted);">Provisioner 1 Address<br><span style="font-size:10px;color:var(--dim)">for event highlighting</span></label>
+      <input class="modal-input" id="cfg-prov1-addr" type="text" style="margin:0;" placeholder="Staking address (base58)">
+
+      <label style="font-size:11px;color:var(--muted);">Stake Limit (DUSK)<br><span style="font-size:10px;color:var(--dim)">total across all provisioners</span></label>
+      <input class="modal-input" id="cfg-stake-limit" type="number" style="margin:0;" placeholder="3000000">
+
+      <label style="font-size:11px;color:var(--muted);">Max. % Slashed<br><span style="font-size:10px;color:var(--dim)">combined Reclaimable slashed stake cap (e.g. 2 = 2%)</span></label>
+      <input class="modal-input" id="cfg-max-slash-pct" type="number" step="0.1" min="0" max="100" style="margin:0;" placeholder="2">
+
+      <label style="font-size:11px;color:var(--muted);">Rotation Window (blocks)<br><span style="font-size:10px;color:var(--dim)">100–50 blocks before transition</span></label>
+      <input class="modal-input" id="cfg-rotation" type="number" style="margin:0;" placeholder="100">
+
+      <label style="font-size:11px;color:var(--muted);">Snatch Window (blocks)<br><span style="font-size:10px;color:var(--dim)">50–0 blocks before transition</span></label>
+      <input class="modal-input" id="cfg-snatch" type="number" style="margin:0;" placeholder="50">
+
+      <label style="font-size:11px;color:var(--muted);">Backfill Blocks<br><span style="font-size:10px;color:var(--dim)">Blocks to scan on poller startup</span></label>
+      <input class="modal-input" id="cfg-backfill" type="number" style="margin:0;" placeholder="200">
+
+      <label style="font-size:11px;color:var(--muted);grid-column:1/-1;margin-top:8px;border-top:1px solid var(--border);padding-top:8px;color:var(--cyan);">Rotation</label>
+      <label style="font-size:11px;color:var(--muted);">Prov 0 Address<br><span style="font-size:10px;color:var(--dim)">auto-detected from wallet</span></label>
+      <span id="cfg-prov0-addr-display" style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--muted);">—</span>
+
+      <label style="font-size:11px;color:var(--muted);">Prov 1 Address<br><span style="font-size:10px;color:var(--dim)">auto-detected from wallet</span></label>
+      <span id="cfg-prov1-addr-display" style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--muted);">—</span>
+
+      <label style="font-size:11px;color:var(--muted);">Prov 0 SK<br><span style="font-size:10px;color:var(--dim)">stored in ~/.sozu_keys (600)</span></label>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input class="modal-input" id="cfg-prov0-sk" type="password" style="margin:0;flex:1;" placeholder="leave blank to keep existing">
+        <span id="cfg-prov0-sk-status" style="font-size:10px;color:var(--dim);white-space:nowrap;">not set</span>
+      </div>
+
+      <label style="font-size:11px;color:var(--muted);">Prov 1 SK<br><span style="font-size:10px;color:var(--dim)">stored in ~/.sozu_keys (600)</span></label>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input class="modal-input" id="cfg-prov1-sk" type="password" style="margin:0;flex:1;" placeholder="leave blank to keep existing">
+        <span id="cfg-prov1-sk-status" style="font-size:10px;color:var(--dim);white-space:nowrap;">not set</span>
+      </div>
+
+      <label style="font-size:11px;color:var(--muted);">Rotation Seed (DUSK)<br><span style="font-size:10px;color:var(--dim)">reserved for re-seeding after liq+term</span></label>
+      <input class="modal-input" id="cfg-seed-dusk" type="number" style="margin:0;" placeholder="1000">
+    </div>
+
+    <div id="cfg-status" style="font-size:11px;color:var(--green);min-height:18px;margin-top:10px;"></div>
+
+    <div class="modal-actions" style="margin-top:10px;">
+      <button class="mbtn mbtn-cancel" onclick="resetConfig()">reset defaults</button>
+      <button class="mbtn mbtn-cancel" onclick="closeModal('modal-config')">cancel</button>
+      <button class="mbtn mbtn-confirm" onclick="saveConfig()">save</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
