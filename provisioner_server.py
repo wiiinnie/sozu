@@ -44,7 +44,7 @@ import functools
 import hashlib
 import secrets
 
-from flask import Flask, jsonify, request, Response, stream_with_context
+from flask import Flask, jsonify, request, Response, stream_with_context, send_file
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -420,6 +420,20 @@ def get_password() -> str:
 @app.route("/api/ping")
 def ping():
     return jsonify({"ok": True, "ts": datetime.now().isoformat()})
+
+
+@app.route("/")
+def index():
+    """Serve the dashboard HTML from the same directory as this script."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    # Accept any provisioner_dashboard*.html in the same directory,
+    # preferring the highest version (last alphabetically).
+    import glob
+    candidates = sorted(glob.glob(os.path.join(here, "provisioner_dashboard*.html")))
+    if not candidates:
+        return ("Dashboard HTML not found. Place provisioner_dashboard*.html "
+                "in the same directory as this server script.", 404)
+    return send_file(candidates[-1])
 
 
 @app.route("/api/status")
@@ -1567,7 +1581,50 @@ def _do_liquidate_terminate(addr: str, idx: int, pw: str) -> tuple:
     return True, lux_amount
 
 
-def _extract_lux_from_event(ev: dict) -> int:
+def _do_deactivate(addr: str, idx: int, pw: str) -> bool:
+    """
+    Deactivate a maturing (or seeded inactive) provisioner via stake_deactivate.
+    Used for M:2 same-epoch and I:2 both-seeded recovery.
+    Returns True on success.
+    """
+    r1 = operator_cmd(f"calculate-payload-stake-deactivate --provisioner {addr}",
+                      timeout=30, password=pw)
+    if not r1["ok"]:
+        _rlog(f"stake_deactivate payload failed: {(r1.get('stderr') or '')[:120]}", "error")
+        return False
+    pl = extract_payload(r1["stdout"])
+    log_idx_before = len(_event_log)
+    r2 = operator_cmd(
+        f"contract-call --contract-id {CONTRACT_ADDRESS()} --fn-name stake_deactivate "
+        f"--fn-args '{pl}' --gas-limit {GAS_LIMIT}",
+        timeout=60, password=pw)
+    stderr = (r2.get("stderr") or "")
+    if not r2["ok"] or "Transaction error" in stderr or "Panic" in stderr:
+        _rlog(f"stake_deactivate tx failed: {stderr[:200]}", "error")
+        return False
+
+    # Wait for stake_deactivate event (up to 15s)
+    prefix = addr[:8]
+    _rlog(f"stake_deactivate tx submitted — waiting for event (prov prefix: {prefix})")
+    deadline = time.time() + 15
+    confirmed = False
+    while time.time() < deadline:
+        with _event_log_lock:
+            new_entries = list(_event_log[log_idx_before:])
+        for ev in new_entries:
+            if "deactivate" in ev.get("topic", ""):
+                haystack = json.dumps(ev.get("decoded", "")) + (ev.get("data", ""))
+                if prefix in haystack:
+                    _rlog("stake_deactivate event confirmed")
+                    confirmed = True
+                    break
+        if confirmed:
+            break
+        time.sleep(2)
+
+    if not confirmed:
+        _rlog("stake_deactivate event not seen within 15s — proceeding anyway", "warn")
+    return True
     """Extract LUX integer from a decoded SOZU event entry."""
     decoded = ev.get("decoded", {})
     if isinstance(decoded, dict):
@@ -1879,11 +1936,11 @@ def recover_stake_rotation(state: dict, tip: int, pw: str):
     Recovers back to regular operation (A:1 & M:1).
 
     Handled states:
-      A:2 M:0 I:0  — liq+term one active, seed with 1k
-      I:2          — seed only the unseeded one (or first if both at 0)
-      M:2          — liq+term one maturing, seed with 1k
-      A:1 M:0 I:1  — seed inactive with 1k
-      A:0 M:1 I:1  — seed inactive with 1k
+      I:2 both empty    — stake prov[0] only; seed prov[1] after transition
+      I:2 one seeded    — wait for seeded one to transition to M
+      I:2 both seeded   — deactivate one to prevent A:2
+      M:2 same epoch    — deactivate one (stake_deactivate) to prevent A:2
+      M:2 diff epochs   — resolves naturally to A:1 M:1, no action needed
     """
     seed_dusk   = float(cfg("rotation_seed_dusk")       or 1_000)
     stake_limit = float(cfg("operator_stake_limit")     or 3_000_000)
@@ -1931,84 +1988,108 @@ def recover_stake_rotation(state: dict, tip: int, pw: str):
         _rset("idle")
         return
 
-    # ── I:2 — seed only the unseeded provisioner (or first if both at 0) ──────
+    # ── I:2 ───────────────────────────────────────────────────────────────────
     if n_i == 2 and n_a == 0 and n_m == 0:
         unseeded = [n for n in inactive if n.get("amount_dusk", 0.0) == 0]
         seeded   = [n for n in inactive if n.get("amount_dusk", 0.0) > 0]
 
-        if len(seeded) >= 1 and len(unseeded) == 0:
-            # Both already seeded — just wait for transitions
-            _rlog("I:2 both provisioners already seeded — waiting for transitions")
+        if len(seeded) == 2:
+            # Both seeded — both will activate in the same epoch → A:2.
+            # Deactivate one (the lower-transitions one) so we reach I:1 seeded + I:1 empty.
+            to_deact = min(seeded, key=lambda n: n.get("transitions") or 0)
+            addr = (to_deact.get("staking_address")
+                    or cfg(f"prov_{to_deact['idx']}_address") or "")
+            if not addr:
+                _rlog(f"I:2 both seeded — prov[{to_deact['idx']}] address unknown, "
+                      f"cannot deactivate", "error")
+                _rset("error")
+                _rotation_state["last_error"] = f"prov[{to_deact['idx']}] address unknown"
+                return
+            _rlog(f"I:2 both seeded — deactivating prov[{to_deact['idx']}] to prevent A:2")
+            _rset("recovering", f"deactivate prov[{to_deact['idx']}]")
+            ok = _do_deactivate(addr, to_deact["idx"], pw)
+            if not ok:
+                _rset("error")
+                _rotation_state["last_error"] = "I:2 deactivate failed"
+                return
+            _rlog("I:2 both-seeded recovery done — now I:1 seeded + I:1 empty → "
+                  "seed empty next tick → M:1 I:1 → A:1 M:1")
             _rset("idle")
             return
 
         if len(seeded) == 1:
-            # One seeded, one not — seed the other
-            target = unseeded[0]
-            _rlog(f"I:2 prov[{seeded[0]['idx']}] already seeded — "
-                  f"seeding prov[{target['idx']}] with {seed_dusk:.0f} DUSK")
-        else:
-            # Both at 0 — seed only the first
-            target = inactive[0]
-            _rlog(f"I:2 both unseeded — seeding prov[{target['idx']}] only "
-                  f"({seed_dusk:.0f} DUSK). Will seed other after transition.")
+            # One seeded (will become M at next epoch), one empty.
+            # Wait — seeded one transitions to M next epoch, then A:0 M:1 I:1 handles it.
+            _rlog(f"I:2 prov[{seeded[0]['idx']}] seeded — waiting for epoch transition "
+                  f"to M before seeding prov[{unseeded[0]['idx']}]")
+            _rset("idle")
+            return
 
+        # Both empty — stake only the first
+        target = inactive[0]
+        _rlog(f"I:2 both empty — staking prov[{target['idx']}] only "
+              f"({seed_dusk:.0f} DUSK). Will seed other after transition.")
         _rset("recovering", f"seed prov[{target['idx']}]")
         ok, _ = _seed_from_pool(target["idx"], seed_dusk, pw)
         if not ok:
-            _rset("idle")   # pool empty or tx failed — retry next tick
+            _rset("idle")
             return
-        _rlog("I:2 recovery step done — expecting I:1 seeded + I:1 unseeded → "
-              "seed other next epoch → A:1 M:1")
+        _rlog("I:2 step done — expecting M:1 I:1 → seed other → A:1 M:1")
         _rset("idle")
         return
 
-    # ── M:2 — liq+term one maturing, seed with 1k ─────────────────────────────
+    # ── M:2 ───────────────────────────────────────────────────────────────────
     if n_m == 2 and n_a == 0 and n_i == 0:
-        # Pick the one with fewer transitions (less progressed) to terminate
-        to_rm  = min(maturing, key=lambda n: n.get("transitions") or 0)
-        addr   = (to_rm.get("staking_address")
-                  or cfg(f"prov_{to_rm['idx']}_address") or "")
+        epoch_a = maturing[0].get("active_epoch") or maturing[0].get("transitions")
+        epoch_b = maturing[1].get("active_epoch") or maturing[1].get("transitions")
+
+        if epoch_a is not None and epoch_b is not None and epoch_a != epoch_b:
+            # Different activation epochs — earlier one activates first → resolves
+            # naturally to A:1 M:1. No intervention needed.
+            _rlog(f"M:2 — different activation epochs "
+                  f"(prov[{maturing[0]['idx']}]={epoch_a} prov[{maturing[1]['idx']}]={epoch_b}) "
+                  f"— will resolve to A:1 M:1 naturally, no action needed")
+            _rset("idle")
+            return
+
+        # Same epoch (or unknown) — both activate together → A:2 incoming.
+        # Deactivate the one with fewer transitions (less stake history to lose).
+        to_deact   = min(maturing, key=lambda n: n.get("transitions") or 0)
+        to_keep    = [n for n in maturing if n["idx"] != to_deact["idx"]][0]
+        addr = (to_deact.get("staking_address")
+                or cfg(f"prov_{to_deact['idx']}_address") or "")
         if not addr:
-            _rlog(f"prov[{to_rm['idx']}] address unknown — cannot recover M:2", "error")
+            _rlog(f"M:2 same epoch — prov[{to_deact['idx']}] address unknown", "error")
             _rset("error")
-            _rotation_state["last_error"] = f"prov[{to_rm['idx']}] address unknown"
+            _rotation_state["last_error"] = f"prov[{to_deact['idx']}] address unknown"
             return
-        _rlog(f"M:2 recovery: liq+term prov[{to_rm['idx']}] "
-              f"(transitions={to_rm.get('transitions')})")
-        _rset("recovering", f"liq+term prov[{to_rm['idx']}]")
-        ok, _ = _do_liquidate_terminate(addr, to_rm["idx"], pw)
+        _rlog(f"M:2 same epoch — deactivating prov[{to_deact['idx']}] "
+              f"(transitions={to_deact.get('transitions')}) to prevent A:2")
+        _rset("recovering", f"deactivate prov[{to_deact['idx']}]")
+        ok = _do_deactivate(addr, to_deact["idx"], pw)
         if not ok:
             _rset("error")
-            _rotation_state["last_error"] = "M:2 liq+term failed"
-            return
-        to_keep_mat = [n for n in maturing if n["idx"] != to_rm["idx"]][0]
-        _rlog(f"M:2 → seeding prov[{to_rm['idx']}] with up to {seed_dusk:.0f} DUSK from pool")
-        ok, _ = _seed_from_pool(to_rm["idx"], seed_dusk, pw)
-        if not ok:
-            _rset("idle")   # pool empty or tx failed — retry next tick
+            _rotation_state["last_error"] = "M:2 deactivate failed"
             return
         time.sleep(5)
         # Top up surviving maturing provisioner from pool
-        rot_win     = int(cfg("rotation_window")       or 100)
-        blk_left    = EPOCH_BLOCKS - (tip % EPOCH_BLOCKS)
+        rot_win  = int(cfg("rotation_window") or 100)
+        blk_left = EPOCH_BLOCKS - (tip % EPOCH_BLOCKS)
         if blk_left > rot_win:
-            _staked_r4   = to_keep_mat.get("amount_dusk", 0.0)
-            pool_dusk    = _query_pool_balance_dusk(_staked_r4)
+            pool_dusk    = _query_pool_balance_dusk(to_keep.get("amount_dusk", 0.0))
             stake_limit  = float(cfg("operator_stake_limit") or 3_000_000)
-            mat_occupied = (to_keep_mat.get("amount_dusk", 0.0)
-                           + to_keep_mat.get("slashed_dusk", 0.0))
-            # Other provisioner just got seed_dusk (no slash yet)
+            mat_occupied = (to_keep.get("amount_dusk", 0.0)
+                            + to_keep.get("slashed_dusk", 0.0))
             mat_capacity = max(0.0, stake_limit - seed_dusk - mat_occupied)
             topup_dusk   = min(pool_dusk, mat_capacity)
             if topup_dusk >= 1:
-                _rlog(f"M:2 — top-up surviving maturing prov[{to_keep_mat['idx']}] "
+                _rlog(f"M:2 — top-up surviving maturing prov[{to_keep['idx']}] "
                       f"{topup_dusk:.2f} DUSK from pool")
-                _stake_lux(to_keep_mat["idx"], int(topup_dusk * 100) * 10_000_000, pw)
+                _stake_lux(to_keep["idx"], int(topup_dusk * 100) * 10_000_000, pw)
             else:
-                _rlog(f"M:2 — maturing prov[{to_keep_mat['idx']}] at capacity "
+                _rlog(f"M:2 — maturing prov[{to_keep['idx']}] at capacity "
                       f"or pool empty (pool={pool_dusk:.2f} cap={mat_capacity:.2f} DUSK)")
-        _rlog("M:2 recovery done — expecting M:1 I:1 → A:1 M:1 after transition")
+        _rlog("M:2 same-epoch recovery done — expecting M:1 I:1 → A:1 M:1")
         _rset("idle")
         return
 
@@ -2053,7 +2134,9 @@ def recover_stake_rotation(state: dict, tip: int, pw: str):
         _rset("idle")
         return
 
-    # ── A:0 M:1 I:1 — seed inactive, then top up maturing from pool ────────────
+    # ── A:0 M:1 I:1 — seed inactive + top up maturing from pool ─────────────────
+    # Seeding inactive here creates brief M:2, but prov[0] was staked earlier
+    # so it always activates first → resolves naturally to A:1 M:1.
     if n_a == 0 and n_m == 1 and n_i == 1:
         mat    = maturing[0]
         target = inactive[0]
@@ -2061,24 +2144,21 @@ def recover_stake_rotation(state: dict, tip: int, pw: str):
             _rlog(f"A:0 M:1 I:1 — prov[{target['idx']}] already seeded, "
                   f"waiting for transition")
         else:
-            # Seed from pool — no tx if pool < seed_dusk (contract minimum)
             _rset("recovering", f"seed prov[{target['idx']}]")
             ok, _ = _seed_from_pool(target["idx"], seed_dusk, pw)
             if ok:
                 time.sleep(5)
-            # If pool insufficient, fall through to maturing top-up check anyway
         # Top up maturing from pool (epoch_state_regular only)
         rot_win     = int(cfg("rotation_window")       or 100)
         blk_left    = EPOCH_BLOCKS - (tip % EPOCH_BLOCKS)
         if blk_left > rot_win:
-            _staked_r3   = mat.get("amount_dusk", 0.0)
-            pool_dusk    = _query_pool_balance_dusk(_staked_r3)
-            stake_limit  = float(cfg("operator_stake_limit") or 3_000_000)
+            _staked_r3    = mat.get("amount_dusk", 0.0)
+            pool_dusk     = _query_pool_balance_dusk(_staked_r3)
+            stake_limit   = float(cfg("operator_stake_limit") or 3_000_000)
             mat_occupied  = mat.get("amount_dusk", 0.0) + mat.get("slashed_dusk", 0.0)
-            # Inactive prov has seed_dusk just added (no slash yet)
             inact_occupied = max(seed_dusk, target.get("amount_dusk", 0.0))
             mat_capacity  = max(0.0, stake_limit - inact_occupied - mat_occupied)
-            topup_dusk   = min(pool_dusk, mat_capacity)
+            topup_dusk    = min(pool_dusk, mat_capacity)
             if topup_dusk >= 1:
                 _rlog(f"A:0 M:1 I:1 — top-up maturing prov[{mat['idx']}] "
                       f"{topup_dusk:.2f} DUSK from pool")
@@ -2086,7 +2166,7 @@ def recover_stake_rotation(state: dict, tip: int, pw: str):
             else:
                 _rlog(f"A:0 M:1 I:1 — maturing prov[{mat['idx']}] at capacity "
                       f"or pool empty (pool={pool_dusk:.2f} cap={mat_capacity:.2f} DUSK)")
-        _rlog("A:0 M:1 I:1 done — expecting A:1 M:1 after next transition")
+        _rlog("A:0 M:1 I:1 done — expecting A:1 M:1 after prov[0] activates")
         _rset("idle")
         return
 
@@ -2307,8 +2387,29 @@ _tx_error_log: list = []
 _tx_error_log_lock = threading.Lock()
 
 # Cache of known provisioner hex keys (32B, 64 hex chars) belonging to this operator.
-# Populated lazily on first rotation tick with a valid password.
+# Populated once by _ensure_own_keys, then persisted to disk.
 _own_provisioner_keys: set = set()
+_OWN_KEYS_PATH = os.path.expanduser("~/.sozu_own_provisioner_keys.json")
+
+def _load_own_keys():
+    global _own_provisioner_keys
+    try:
+        with open(_OWN_KEYS_PATH) as f:
+            keys = json.load(f)
+        if isinstance(keys, list) and keys:
+            _own_provisioner_keys = set(k.lower() for k in keys)
+            _log(f"[mine] loaded {len(_own_provisioner_keys)} own provisioner key(s) from disk")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        _log(f"[mine] could not load own keys: {e}")
+
+def _save_own_keys():
+    try:
+        with open(_OWN_KEYS_PATH, "w") as f:
+            json.dump(list(_own_provisioner_keys), f)
+    except Exception as e:
+        _log(f"[mine] could not save own keys: {e}")
 
 def _derive_provisioner_hex(idx: int, pw: str) -> str:
     """Derive the 32-byte provisioner public key hex for a given profile index
@@ -2332,18 +2433,25 @@ def _derive_provisioner_hex(idx: int, pw: str) -> str:
     return ""
 
 def _ensure_own_keys(pw: str):
-    """Populate _own_provisioner_keys if not already done."""
+    """Populate _own_provisioner_keys if not already done.
+    Loads from disk first — only runs wallet commands if keys are not yet known."""
     global _own_provisioner_keys
     if _own_provisioner_keys:
         return
+    # Try disk cache first
+    _load_own_keys()
+    if _own_provisioner_keys:
+        return
+    # Not on disk — derive from SKs (runs once ever per installation)
     keys = set()
     for idx in NODE_INDICES:
         h = _derive_provisioner_hex(idx, pw)
         if h:
             keys.add(h.lower())
-            _log(f"[mine] provisioner[{idx}] hex key cached: {h[:8]}…{h[-6:]}")
+            _log(f"[mine] provisioner[{idx}] hex key derived: {h[:8]}…{h[-6:]}")
     if keys:
         _own_provisioner_keys = keys
+        _save_own_keys()
 
 def _log_tx_error(entry: dict):
     with _tx_error_log_lock:
