@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Provisioner Dashboard  v0.5.16 -->
+<!-- Provisioner Dashboard  v0.5.18 -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -281,6 +281,107 @@
   .ev-topic  { font-weight: 600; }
   .ev-data   { color: var(--muted); font-size: 10px; word-break: break-word; line-height: 1.5; }
 
+  /* ── FAILED TRANSACTIONS PANEL ── */
+  #tx-errors-panel {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    border-top: 1px solid var(--border);
+  }
+  #tx-errors-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 12px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    background: var(--bg1);
+  }
+  #tx-errors-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+  }
+  #tx-errors-body::-webkit-scrollbar { width: 4px; }
+  #tx-errors-body::-webkit-scrollbar-track { background: transparent; }
+  #tx-errors-body::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+  .txerr-header-row {
+    display: grid;
+    grid-template-columns: 54px 72px 120px 1fr;
+    padding: 3px 12px;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--dim);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    z-index: 1;
+  }
+  .txerr-row {
+    display: grid;
+    grid-template-columns: 54px 72px 120px 1fr;
+    padding: 5px 12px;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.5;
+    color: var(--muted);
+  }
+  .txerr-row:hover { background: var(--bg2); }
+  .txerr-row.txerr-mine {
+    background: rgba(255,92,92,0.12);
+    border-left: 3px solid var(--red);
+    color: var(--text);
+  }
+  .txerr-row.txerr-mine:hover { background: rgba(255,92,92,0.2); }
+  .txerr-ts   { color: var(--dim); }
+  .txerr-block { color: var(--muted); text-align: right; padding-right: 8px; }
+  .txerr-fn   { color: var(--orange, #f0a050); font-weight: 600; }
+  .txerr-err  { color: var(--muted); font-size: 9px; word-break: break-word; line-height: 1.4; }
+  .txerr-prov { font-size: 9px; color: var(--dim); }
+  .txerr-empty { padding: 12px; color: var(--dim); font-size: 10px; text-align: center; }
+
+  /* mine-only filter checkbox */
+  .mine-filter {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+    color: var(--dim);
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+  }
+  .mine-filter input[type=checkbox] {
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    border: 1px solid var(--border2);
+    border-radius: 2px;
+    background: var(--bg3);
+    cursor: pointer;
+    flex-shrink: 0;
+    position: relative;
+  }
+  .mine-filter input[type=checkbox]:checked {
+    background: var(--cyan);
+    border-color: var(--cyan);
+  }
+  .mine-filter input[type=checkbox]:checked::after {
+    content: '';
+    position: absolute;
+    left: 2px; top: 0px;
+    width: 5px; height: 8px;
+    border: 2px solid var(--bg);
+    border-top: none;
+    border-left: none;
+    transform: rotate(45deg);
+  }
+
   .topic-activate    { color: var(--green); }
   .topic-deactivate  { color: var(--purple); }
   .topic-reward-recycle  { color: var(--yellow); }
@@ -515,6 +616,10 @@
           <button onclick="togglePollerErrors()" id="errors-btn" style="background:var(--bg3);border:1px solid var(--border);
                   border-radius:3px;color:var(--dim);font-family:'IBM Plex Mono',monospace;
                   font-size:10px;padding:2px 6px;cursor:pointer;" title="Show poller errors">errs</button>
+          <label class="mine-filter" title="Show only my events">
+            <input type="checkbox" id="events-mine-only" onchange="applyEventsMineFilter()">
+            mine only
+          </label>
         </div>
         <div class="status-chip" style="font-family:'IBM Plex Mono',monospace; font-size:10px;">
           <span class="dot dot-green dot-pulse" id="stream-dot"></span>
@@ -530,8 +635,28 @@
       <div style="color:var(--yellow);margin-bottom:4px;">Poller errors</div>
       <div id="poller-errors-body" style="color:var(--red);"></div>
     </div>
-    <div class="col-body" id="events-body">
+    <div class="col-body" id="events-body" style="flex:2;">
       <div class="ev-empty">waiting for events…<br><span style="color:var(--dim)">polling every 4s</span></div>
+    </div>
+
+    <!-- FAILED TRANSACTIONS SUB-PANEL -->
+    <div id="tx-errors-panel">
+      <div id="tx-errors-head">
+        <span style="font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);">Failed Transactions</span>
+        <div id="txerr-dot" style="width:6px;height:6px;border-radius:50%;background:var(--dim);flex-shrink:0;"></div>
+        <span style="flex:1;"></span>
+        <label class="mine-filter" title="Show only my failed transactions">
+          <input type="checkbox" id="txerr-mine-only" onchange="applyTxErrMineFilter()">
+          mine only
+        </label>
+        <span id="txerr-count" style="font-size:9px;color:var(--dim);font-family:'IBM Plex Mono',monospace;margin-left:8px;"></span>
+      </div>
+      <div class="txerr-header-row">
+        <span>time</span><span style="text-align:right;padding-right:8px">block</span><span>function</span><span>error</span>
+      </div>
+      <div id="tx-errors-body">
+        <div class="txerr-empty">no failed transactions yet</div>
+      </div>
     </div>
   </div>
 
@@ -1414,6 +1539,61 @@ async function pollRotationStatus() {
 setInterval(pollRotationStatus, 10000)
 pollRotationStatus()
 
+// ── MINE-ONLY FILTERS ────────────────────────────────────────────────────────
+
+function applyEventsMineFilter() {
+  const mineOnly = document.getElementById('events-mine-only')?.checked
+  document.querySelectorAll('#events-body .event-row').forEach(row => {
+    if (mineOnly) {
+      row.style.display = row.classList.contains('ev-mine') ? '' : 'none'
+    } else {
+      row.style.display = ''
+    }
+  })
+  // Update empty-state visibility
+  const body = document.getElementById('events-body')
+  const visible = body.querySelectorAll('.event-row:not([style*="none"])').length
+  if (visible === 0 && mineOnly) {
+    if (!body.querySelector('.ev-mine-empty')) {
+      const d = document.createElement('div')
+      d.className = 'ev-empty ev-mine-empty'
+      d.textContent = 'no events from your account yet'
+      body.appendChild(d)
+    }
+  } else {
+    body.querySelector('.ev-mine-empty')?.remove()
+  }
+}
+
+function applyTxErrMineFilter() {
+  const mineOnly = document.getElementById('txerr-mine-only')?.checked
+  document.querySelectorAll('#tx-errors-body .txerr-row').forEach(row => {
+    if (mineOnly) {
+      row.style.display = row.dataset.mine === 'true' ? '' : 'none'
+    } else {
+      row.style.display = ''
+    }
+  })
+  const body = document.getElementById('tx-errors-body')
+  const visible = body.querySelectorAll('.txerr-row:not([style*="none"])').length
+  if (visible === 0 && mineOnly) {
+    if (!body.querySelector('.txerr-mine-empty')) {
+      const d = document.createElement('div')
+      d.className = 'txerr-empty txerr-mine-empty'
+      d.textContent = 'no failed transactions from your account yet'
+      body.appendChild(d)
+    }
+  } else {
+    body.querySelector('.txerr-mine-empty')?.remove()
+  }
+}
+
+// Re-apply both filters after new rows are rendered (called from renderEvent / renderTxError)
+function _reapplyFilters() {
+  if (document.getElementById('events-mine-only')?.checked) applyEventsMineFilter()
+  if (document.getElementById('txerr-mine-only')?.checked) applyTxErrMineFilter()
+}
+
 // ── SOZU EVENT STREAM ─────────────────────────────────────────────────────────
 async function togglePollerErrors() {
   const panel = document.getElementById('poller-errors-panel')
@@ -1516,6 +1696,7 @@ function _rehighlightAll() {
       row.classList.remove('ev-mine')
     }
   })
+  _rehighlightTxErrors()
 }
 
 function renderEvent(entry) {
@@ -1551,6 +1732,83 @@ function renderEvent(entry) {
   if (!inserted) body.appendChild(row)
   // keep max 200 rows
   while (body.children.length > 200) body.removeChild(body.lastChild)
+  _reapplyFilters()
+}
+
+// ── FAILED TRANSACTIONS ──────────────────────────────────────────────────────
+const _seenTxErrors = new Set()
+
+function _txErrorContainsMine(entry) {
+  return entry.mine === true
+}
+
+function _rehighlightTxErrors() {
+  // mine flag is set server-side — re-apply it on all rendered rows
+  // (handles history loaded before _own_provisioner_keys were derived)
+  document.querySelectorAll('#tx-errors-body .txerr-row').forEach(row => {
+    const mine = row.dataset.mine === 'true'
+    row.classList.toggle('txerr-mine', mine)
+  })
+}
+
+function renderTxError(entry) {
+  const body = document.getElementById('tx-errors-body')
+  body.querySelector('.txerr-empty')?.remove()
+
+  const row = document.createElement('div')
+  row.className = 'txerr-row'
+  row.dataset.height = entry.height
+  row.dataset.mine = entry.mine ? 'true' : 'false'
+  row.dataset.haystack = (entry.provisioner || '') + (entry.fn_name || '') + (entry.id || '')
+
+  if (entry.mine) row.classList.add('txerr-mine')
+
+  const errShort = (entry.err || '').replace(/^Panic:\s*\[pool\]\s*/i, '').slice(0, 140)
+
+  row.innerHTML = `
+    <span class="txerr-ts">${entry.ts}</span>
+    <span class="txerr-block">${(entry.height||0).toLocaleString()}</span>
+    <span class="txerr-fn">${entry.fn_name || '?'}</span>
+    <span class="txerr-err">${errShort}</span>
+  `
+  // Insert newest first
+  let inserted = false
+  for (const child of body.children) {
+    if (entry.height >= parseInt(child.dataset.height || '0')) {
+      body.insertBefore(row, child)
+      inserted = true
+      break
+    }
+  }
+  if (!inserted) body.appendChild(row)
+  while (body.children.length > 100) body.removeChild(body.lastChild)
+
+  // Update count badge
+  const count = body.querySelectorAll('.txerr-row').length
+  const countEl = document.getElementById('txerr-count')
+  if (countEl) countEl.textContent = count > 0 ? `${count} error${count===1?'':'s'}` : ''
+  _reapplyFilters()
+}
+
+function connectTxErrorStream() {
+  const dot = document.getElementById('txerr-dot')
+  const src = new EventSource(`${API}/api/events/tx_errors/stream`)
+  src.onopen = () => { if (dot) dot.style.background = 'var(--red)' }
+  src.onmessage = e => {
+    try {
+      const entry = JSON.parse(e.data)
+      const key = `${entry.height}:${entry.id}`
+      if (!_seenTxErrors.has(key)) {
+        _seenTxErrors.add(key)
+        renderTxError(entry)
+      }
+    } catch {}
+  }
+  src.onerror = () => {
+    if (dot) dot.style.background = 'var(--dim)'
+    src.close()
+    setTimeout(connectTxErrorStream, 5000)
+  }
 }
 
 function connectEventStream() {
@@ -1641,6 +1899,21 @@ setInterval(_pollCmdLog, 15000)
 // Fetch own address prefixes FIRST, then load history, then connect SSE
 // This ensures ev-mine highlighting works on initial render
 _updateOwnPrefixes().finally(() => {
+  // Load failed tx history then connect live stream
+  fetch(`${API}/api/events/tx_errors/history`)
+    .then(r => r.json())
+    .then(entries => {
+      entries.reverse().forEach(entry => {
+        const key = `${entry.height}:${entry.id}`
+        if (!_seenTxErrors.has(key)) {
+          _seenTxErrors.add(key)
+          renderTxError(entry)
+        }
+      })
+    })
+    .catch(() => {})
+    .finally(() => connectTxErrorStream())
+
   fetch(`${API}/api/events/history`)
     .then(r => r.json())
     .then(events => {
