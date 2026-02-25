@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Provisioner Manager – Web Backend
-Version: v0.5.30
+Version: v0.5.32
 
 Wraps provisioner manager CLI commands as REST endpoints.
 Run: python3 provisioner_server.py
@@ -40,10 +40,61 @@ from collections import deque
 
 import logging
 
+import functools
+import hashlib
+import secrets
+
 from flask import Flask, jsonify, request, Response, stream_with_context
 from flask_cors import CORS
 
 app = Flask(__name__)
+
+# ── HTTP Basic Auth ───────────────────────────────────────────────────────────
+# Set via environment variables before starting the server:
+#   export SOZU_DASHBOARD_USER=admin
+#   export SOZU_DASHBOARD_PASS=yourpassword
+# If neither is set, auth is disabled (safe when access is SSH-tunnel-only).
+_AUTH_USER = os.environ.get("SOZU_DASHBOARD_USER", "")
+_AUTH_PASS = os.environ.get("SOZU_DASHBOARD_PASS", "")
+_AUTH_ENABLED = bool(_AUTH_USER and _AUTH_PASS)
+
+def _check_auth(username: str, password: str) -> bool:
+    """Constant-time comparison to prevent timing attacks."""
+    ok_user = secrets.compare_digest(username.encode(), _AUTH_USER.encode())
+    ok_pass = secrets.compare_digest(password.encode(), _AUTH_PASS.encode())
+    return ok_user and ok_pass
+
+def _auth_required(f):
+    """Decorator: enforce HTTP Basic Auth when auth is enabled."""
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        if not _AUTH_ENABLED:
+            return f(*args, **kwargs)
+        auth = request.authorization
+        if not auth or not _check_auth(auth.username, auth.password):
+            return Response(
+                "Authentication required.",
+                401,
+                {"WWW-Authenticate": 'Basic realm="SOZU Dashboard"'}
+            )
+        return f(*args, **kwargs)
+    return decorated
+
+@app.before_request
+def _global_auth():
+    """Apply auth to every request when enabled."""
+    if not _AUTH_ENABLED:
+        return
+    # Allow OPTIONS preflight through for CORS
+    if request.method == "OPTIONS":
+        return
+    auth = request.authorization
+    if not auth or not _check_auth(auth.username, auth.password):
+        return Response(
+            "Authentication required.",
+            401,
+            {"WWW-Authenticate": 'Basic realm="SOZU Dashboard"'}
+        )
 CORS(app)
 
 # ── Logging / output setup ───────────────────────────────────────────────────
@@ -218,28 +269,45 @@ def _strip_ansi(s: str) -> str:
 
 
 def run_cmd(cmd: str, timeout: int = 30) -> dict:
-    """Run a shell command, return {ok, stdout, stderr, returncode, duration_ms}."""
+    """Run a shell command, return {ok, stdout, stderr, returncode, duration_ms}.
+
+    Uses start_new_session=True so the shell and all its children share a
+    process group.  On timeout we kill the entire group — this prevents wallet
+    binary zombies that outlive the shell when subprocess.TimeoutExpired fires.
+    """
+    import os, signal
     t0 = time.time()
+    proc = subprocess.Popen(
+        cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, start_new_session=True
+    )
     try:
-        result = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=timeout
-        )
+        stdout, stderr = proc.communicate(timeout=timeout)
         return {
-            "ok":           result.returncode == 0,
-            "stdout":       _strip_ansi(result.stdout).strip(),
-            "stderr":       _strip_ansi(result.stderr).strip(),
-            "returncode":   result.returncode,
+            "ok":           proc.returncode == 0,
+            "stdout":       _strip_ansi(stdout).strip(),
+            "stderr":       _strip_ansi(stderr).strip(),
+            "returncode":   proc.returncode,
             "duration_ms":  int((time.time() - t0) * 1000),
             "cmd":          cmd,
             "ts":           datetime.now().isoformat(),
         }
     except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:
+            proc.kill()
+        proc.communicate()
         return {
             "ok": False, "stdout": "", "returncode": -1,
             "stderr": f"timeout after {timeout}s", "duration_ms": timeout * 1000,
             "cmd": cmd, "ts": datetime.now().isoformat(),
         }
     except Exception as exc:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:
+            proc.kill()
         return {
             "ok": False, "stdout": "", "returncode": -1,
             "stderr": str(exc), "duration_ms": 0,
@@ -271,42 +339,61 @@ def wallet_cmd(subcmd: str, timeout: int = 30, password: str = "") -> dict:
         inner     = f"{WALLET_BIN} --wallet-dir {WALLET_PATH} --network {NETWORK} {subcmd}"
         log_cmd   = inner
 
-    t0 = time.time()
-    try:
-        result = subprocess.run(
-            inner, shell=True, capture_output=True, text=True, timeout=timeout
+    with _wallet_lock:
+        import os, signal
+        t0 = time.time()
+        proc = subprocess.Popen(
+            inner, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True
         )
-        return {
-            "ok":          result.returncode == 0,
-            "stdout":      _strip_ansi(result.stdout).strip(),
-            "stderr":      _strip_ansi(result.stderr).strip(),
-            "returncode":  result.returncode,
-            "duration_ms": int((time.time() - t0) * 1000),
-            "cmd":         log_cmd,
-            "ts":          datetime.now().isoformat(),
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "ok": False, "stdout": "", "returncode": -1,
-            "stderr": (
-                f"timeout after {timeout}s — the wallet did not respond.\n"
-                f"Tried flag: {WALLET_PASSWORD_FLAG}\n"
-                f"If your wallet uses a different flag, update WALLET_PASSWORD_FLAG in provisioner_server.py"
-            ),
-            "duration_ms": timeout * 1000,
-            "cmd": log_cmd, "ts": datetime.now().isoformat(),
-        }
-    except Exception as exc:
-        return {
-            "ok": False, "stdout": "", "returncode": -1,
-            "stderr": str(exc), "duration_ms": 0,
-            "cmd": log_cmd, "ts": datetime.now().isoformat(),
-        }
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+            return {
+                "ok":          proc.returncode == 0,
+                "stdout":      _strip_ansi(stdout).strip(),
+                "stderr":      _strip_ansi(stderr).strip(),
+                "returncode":  proc.returncode,
+                "duration_ms": int((time.time() - t0) * 1000),
+                "cmd":         log_cmd,
+                "ts":          datetime.now().isoformat(),
+            }
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                proc.kill()
+            proc.communicate()
+            return {
+                "ok": False, "stdout": "", "returncode": -1,
+                "stderr": (
+                    f"timeout after {timeout}s — the wallet did not respond.\n"
+                    f"Tried flag: {WALLET_PASSWORD_FLAG}\n"
+                    f"If your wallet uses a different flag, update WALLET_PASSWORD_FLAG in provisioner_server.py"
+                ),
+                "duration_ms": timeout * 1000,
+                "cmd": log_cmd, "ts": datetime.now().isoformat(),
+            }
+        except Exception as exc:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                proc.kill()
+            return {
+                "ok": False, "stdout": "", "returncode": -1,
+                "stderr": str(exc), "duration_ms": 0,
+                "cmd": log_cmd, "ts": datetime.now().isoformat(),
+            }
 
 
 # ── Password helper ──────────────────────────────────────────────────────────
 
 _cached_wallet_pw: str = ""  # updated on every request that carries a password
+
+# Serialise all wallet_cmd / operator_cmd calls — the wallet cache directory
+# uses a single LOCK file (LMDB/RocksDB) and only one process may hold it at
+# a time.  Without this, concurrent calls (rotation thread + dashboard request)
+# produce "IO error: While lock file: LOCK: Resource temporarily unavailable".
+_wallet_lock = threading.Lock()
 
 def get_password() -> str:
     """
@@ -626,7 +713,8 @@ def operator_cmd(subcmd: str, timeout: int = 30, password: str = "") -> dict:
     else:
         cmd     = f"{WALLET_BIN} --wallet-dir {OPERATOR_WALLET} --network {NETWORK} {subcmd}"
         log_cmd = cmd
-    result = run_cmd(cmd, timeout=timeout)
+    with _wallet_lock:
+        result = run_cmd(cmd, timeout=timeout)
     result["cmd"] = log_cmd  # replace with password-masked version
     # Mirror to command output panel when called from rotation thread
     import threading as _thr
@@ -2016,6 +2104,10 @@ def _rotation_tick():
         _rlog("no password cached — skipping tick", "warn")
         return
 
+    # Derive and cache own provisioner hex keys on first tick (needed for
+    # mine-tagging in failed transaction log).
+    _ensure_own_keys(pw)
+
     # Fetch tip
     try:
         import urllib.request as _ur, json as _j
@@ -2209,6 +2301,76 @@ _event_log: list = []
 _event_log_lock = threading.Lock()
 _poller_errors: deque = deque(maxlen=50)   # visible error log
 
+# Failed-transaction log — separate from contract events.
+# Each entry: {ts, height, id, fn_name, provisioner, err, gasSpent}
+_tx_error_log: list = []
+_tx_error_log_lock = threading.Lock()
+
+# Cache of known provisioner hex keys (32B, 64 hex chars) belonging to this operator.
+# Populated lazily on first rotation tick with a valid password.
+_own_provisioner_keys: set = set()
+
+def _derive_provisioner_hex(idx: int, pw: str) -> str:
+    """Derive the 32-byte provisioner public key hex for a given profile index
+    by running calculate-payload-stake-activate with a minimal amount and
+    reading bytes [1:33] of the resulting payload.
+    Returns empty string on failure.
+    """
+    sk = _get_sk(idx)
+    if not sk:
+        return ""
+    r = operator_cmd(
+        f"calculate-payload-stake-activate --provisioner-sk {sk} "
+        f"--amount 1000000000 --network-id {NETWORK_ID()}",
+        timeout=20, password=pw)
+    if not r["ok"]:
+        return ""
+    payload = extract_payload(r["stdout"])
+    # payload hex: [1B option "01"][32B provisioner][rest = amount]
+    if len(payload) >= 66:
+        return payload[2:66]
+    return ""
+
+def _ensure_own_keys(pw: str):
+    """Populate _own_provisioner_keys if not already done."""
+    global _own_provisioner_keys
+    if _own_provisioner_keys:
+        return
+    keys = set()
+    for idx in NODE_INDICES:
+        h = _derive_provisioner_hex(idx, pw)
+        if h:
+            keys.add(h.lower())
+            _log(f"[mine] provisioner[{idx}] hex key cached: {h[:8]}…{h[-6:]}")
+    if keys:
+        _own_provisioner_keys = keys
+
+def _log_tx_error(entry: dict):
+    with _tx_error_log_lock:
+        _tx_error_log.append(entry)
+        if len(_tx_error_log) > 200:
+            del _tx_error_log[:-200]
+
+def _parse_tx_raw(raw_hex: str) -> dict:
+    """Extract fn_name and provisioner address from a raw SOZU transaction hex string.
+    Structure after CONTRACT_ID:
+      [8B LE fn_name_len][fn_name bytes][8B LE args_len][1B option flag][32B addr]
+    Returns {} if parsing fails or CONTRACT_ID not found.
+    """
+    try:
+        idx = raw_hex.lower().find(CONTRACT_ID.lower())
+        if idx == -1:
+            return {}
+        after = raw_hex[idx + len(CONTRACT_ID):]
+        fn_len = int.from_bytes(bytes.fromhex(after[:16]), 'little')
+        fn_name = bytes.fromhex(after[16:16 + fn_len * 2]).decode('ascii', errors='replace')
+        after_fn = after[16 + fn_len * 2:]
+        # skip 8-byte args length prefix + 1-byte option flag = 18 hex chars
+        provisioner = after_fn[18:18 + 64]
+        return {"fn_name": fn_name, "provisioner": provisioner}
+    except Exception:
+        return {}
+
 # Last known good stake-info per node index.
 # Never replaced by an empty/failed result — stale is better than wrong.
 _stake_cache: dict = {}   # {idx: parse_stake_info result dict}
@@ -2266,6 +2428,37 @@ def _sozu_poller(backfill: int = 0):
                 if isinstance(ev, dict)
                 and ev.get("source", "").lower() == CONTRACT_ID.lower()]
 
+    def fetch_and_log_tx_errors(height: int):
+        """Query block transactions, log any failures touching our contract."""
+        q = f'{{ block(height: {height}) {{ transactions {{ err id raw gasSpent }} }} }}'
+        req = ur.Request(GRAPHQL_URL, data=q.encode(),
+                         headers={"rusk-version": RUSK_VERSION,
+                                  "Content-Type": "application/graphql"},
+                         method="POST")
+        with ur.urlopen(req, timeout=8) as r:
+            p = j.loads(r.read())
+        txs = ((p.get("block") or {}).get("transactions")) or []
+        for tx in txs:
+            if not tx.get("err"):
+                continue
+            raw = tx.get("raw", "") or ""
+            if CONTRACT_ID.lower() not in raw.lower():
+                continue
+            parsed = _parse_tx_raw(raw)
+            prov_hex = parsed.get("provisioner", "").lower()
+            entry = {
+                "ts":          datetime.now().strftime("%H:%M:%S"),
+                "height":      height,
+                "id":          tx.get("id", ""),
+                "fn_name":     parsed.get("fn_name", "unknown"),
+                "provisioner": parsed.get("provisioner", ""),
+                "mine":        bool(prov_hex and prov_hex in _own_provisioner_keys),
+                "err":         tx.get("err", ""),
+                "gasSpent":    tx.get("gasSpent", 0),
+            }
+            _log_tx_error(entry)
+            _log(f"[poller] tx-error block={height} fn={entry['fn_name']} err={entry['err'][:60]}")
+
     def decode(topic: str, data_hex: str) -> dict:
         if not data_hex:
             return {}
@@ -2302,6 +2495,13 @@ def _sozu_poller(backfill: int = 0):
                 h = last + 1
                 try:
                     evs = fetch_events(h)
+                    # Only fetch failed txs for live blocks — skip during backfill
+                    # to avoid doubling the backfill time with an extra call per block.
+                    if not is_backfilling:
+                        try:
+                            fetch_and_log_tx_errors(h)
+                        except Exception as _te:
+                            _log(f"[poller] tx-error fetch failed block={h}: {_te}")
                     blocks_scanned += 1
                     def _decode_ev(ev):
                         topic    = ev.get("topic", "")
@@ -2418,6 +2618,42 @@ def events_history():
         return jsonify(list(reversed(_event_log[-200:])))
 
 
+@app.route("/api/events/tx_errors/history", methods=["GET","POST"])
+def tx_errors_history():
+    """Return recent failed transactions newest-first."""
+    with _tx_error_log_lock:
+        return jsonify(list(reversed(_tx_error_log[-200:])))
+
+
+@app.route("/api/events/tx_errors/stream")
+def tx_errors_stream():
+    """SSE endpoint — streams new failed-transaction entries to the browser."""
+    def generate():
+        with _tx_error_log_lock:
+            cursor = len(_tx_error_log)
+        yield ": connected\n\n"
+        heartbeat = 0
+        while True:
+            time.sleep(1)
+            with _tx_error_log_lock:
+                new_entries = _tx_error_log[cursor:]
+                cursor = len(_tx_error_log)
+            out = ""
+            for entry in new_entries:
+                out += f"data: {json.dumps(entry)}\n\n"
+            heartbeat += 1
+            if heartbeat >= 5:
+                heartbeat = 0
+                out += ": ping\n\n"
+            if out:
+                yield out
+    return Response(stream_with_context(generate()),
+                    mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache",
+                             "X-Accel-Buffering": "no",
+                             "Transfer-Encoding": "chunked"})
+
+
 @app.route("/api/events/errors", methods=["GET","POST"])
 def events_errors():
     """Return poller error log for debugging."""
@@ -2524,5 +2760,14 @@ if __name__ == "__main__":
     print(f"  Wallet: {WALLET_PATH}  |  Network: {NETWORK}")
     print(f"  Contract: {CONTRACT_ID[:20]}…")
     print(f"  Backfill: {backfill_n} blocks  |  Config: {_CONFIG_PATH}")
+    if _AUTH_ENABLED:
+        print(f"  Auth: enabled  (user: {_AUTH_USER})")
+    else:
+        print(f"  Auth: disabled  (set SOZU_DASHBOARD_USER / SOZU_DASHBOARD_PASS to enable)")
+    print(f"")
+    print(f"  NOTE: For production use gunicorn instead of this dev server:")
+    print(f"    gunicorn --workers 4 --threads 4 --worker-class gthread \\")
+    print(f"             --bind 0.0.0.0:{PORT} --timeout 120 provisioner_server:app")
+    print(f"  For HTTPS (recommended), add: --certfile cert.pem --keyfile key.pem")
     _start_poller(backfill=backfill_n)
     app.run(host="0.0.0.0", port=PORT, threaded=True, debug=False)
