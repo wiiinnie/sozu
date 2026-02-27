@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Provisioner Manager – Web Backend
-Version: v0.5.32
+Version: v0.6.0
 
 Wraps provisioner manager CLI commands as REST endpoints.
 Run: python3 provisioner_server.py
@@ -140,7 +140,7 @@ NETWORK        = "testnet"
 GRAPHQL_URL    = "https://testnet.nodes.dusk.network/on/graphql/query"
 CONTRACT_ID    = "72883945ac1aa032a88543aacc9e358d1dfef07717094c05296ce675f23078f2"
 RUSK_VERSION   = "1.5"
-NODE_INDICES       = [0, 1]          # provisioner indices to manage
+NODE_INDICES       = [0, 1, 2]       # provisioner indices to manage
 PORT               = 7373
 OPERATOR_WALLET    = os.path.expanduser("~/sozu_operator")
 GAS_LIMIT          = 2000000
@@ -195,6 +195,10 @@ _CONFIG_DEFAULTS = {
     "operator_address":     "",
     "prov_0_address":       "",          # provisioner 0 staking address (for event highlighting)
     "prov_1_address":       "",          # provisioner 1 staking address (for event highlighting)
+    "prov_2_address":       "",          # provisioner 2 staking address (for event highlighting)
+    "node_0_log":           "/var/log/rusk-1.log",  # log path for rusk instance 0
+    "node_1_log":           "/var/log/rusk-2.log",  # log path for rusk instance 1
+    "node_2_log":           "/var/log/rusk-3.log",  # log path for rusk instance 2
     "operator_stake_limit": 3_000_000,   # DUSK, total across all provisioners
     "max_slash_pct":        0.02,        # max combined Reclaimable slashed stake as % of limit
     "rotation_window":      100,         # blocks before epoch end where rotation triggers
@@ -790,31 +794,86 @@ def provisioner_add_provisioner():
 
 
 
+def _parse_profiles_addresses(output: str) -> dict:
+    """
+    Parse `profiles` command output into {idx: staking_address}.
+    Profile N in wallet output maps to provisioner index N-1 (profiles are 1-based).
+    The "Public account" field is the staking address (BLS key).
+    Example:
+        Profile  1 (Default)
+          Public account   - rFHBm9m...
+        Profile  2
+          Public account   - okH7C8Z...
+    """
+    import re as _re
+    result = {}
+    current_profile = None
+    for line in output.splitlines():
+        m_profile = _re.match(r'\s*Profile\s+(\d+)', line)
+        if m_profile:
+            current_profile = int(m_profile.group(1)) - 1  # convert to 0-based
+        m_pub = _re.match(r'\s*Public account\s+-\s+([A-Za-z0-9]{40,})', line)
+        if m_pub and current_profile is not None:
+            result[current_profile] = m_pub.group(1).strip()
+    return result
+
+
 @app.route("/api/provisioner/addresses", methods=["GET","POST"])
 def provisioner_addresses():
     """Return provisioner addresses for event highlighting.
-    Merges: config-stored addresses (always available) + live stake-info addresses.
+    Merges: config-stored addresses (always available) + live stake-info/profiles addresses.
     Config addresses persist even after deactivation/termination.
+    Resolution order per node:
+      1. stake cache (from /live, most authoritative)
+      2. stake-info call (if password available)
+      3. profiles command (password-free, parses Public account)
+      4. config-stored address (persisted from previous run)
     """
     pw = (request.get_json(silent=True) or {}).get("password", get_password())
+
+    # Attempt profiles parse as password-free fallback for all indices at once
+    profiles_addrs = {}
+    try:
+        r_prof = wallet_cmd("profiles", timeout=15, password=pw)
+        profiles_addrs = _parse_profiles_addresses(r_prof.get("stdout", "") + r_prof.get("stderr", ""))
+    except Exception:
+        pass
+
     addrs = {}
     for idx in NODE_INDICES:
-        # Config address takes priority — always present even after stake removal
         cfg_addr = cfg(f"prov_{idx}_address") or ""
-        live_addr = _prov_addr(idx) if pw else ""
-        addrs[str(idx)] = live_addr or cfg_addr  # live wins if available, else config
-        # Auto-save live address to config so it survives deactivation
-        if live_addr and not cfg_addr:
+        live_addr = ""
+
+        # 1. Try stake cache (populated by /live)
+        with _stake_cache_lock:
+            cached = _stake_cache.get(idx, {})
+        live_addr = cached.get("staking_address", "")
+
+        # 2. Fall back to stake-info call (also parses address from no-stake output now)
+        if not live_addr and pw:
+            r = wallet_cmd(f"stake-info --profile-idx {idx}", timeout=20, password=pw)
+            info = parse_stake_info(r.get("stdout", "") + r.get("stderr", ""))
+            live_addr = info.get("staking_address", "")
+
+        # 3. Fall back to profiles output (Public account, no stake required)
+        if not live_addr:
+            live_addr = profiles_addrs.get(idx, "")
+
+        addrs[str(idx)] = live_addr or cfg_addr
+
+        # Auto-save to config so address survives deactivation/termination
+        if live_addr and live_addr != cfg_addr:
             try:
                 current = _load_config()
                 current[f"prov_{idx}_address"] = live_addr
                 _save_config(current)
             except Exception:
                 pass
+
     return jsonify({
-        "ok": True,
+        "ok":        True,
         "addresses": addrs,
-        "operator": OPERATOR_ADDRESS(),
+        "operator":  OPERATOR_ADDRESS(),
     })
 
 @app.route("/api/provisioner/list", methods=["GET","POST"])
@@ -848,7 +907,31 @@ def provisioner_allocate_stake():
     if not sk or not amount:
         return jsonify({"ok": False, "stderr": "provisioner_sk (or provisioner_idx) and amount_dusk required"}), 400
 
-    amount_lux = int(float(amount) * 1_000_000_000)
+    amount_dusk = float(amount)
+
+    # ── Stake limit guard ──────────────────────────────────────────────────────
+    stake_limit = float(cfg("operator_stake_limit") or 0)
+    if stake_limit > 0:
+        with _stake_cache_lock:
+            total_occupied = sum(
+                c.get("amount_dusk", 0.0) + c.get("slashed_dusk", 0.0)
+                for c in _stake_cache.values()
+            )
+        headroom = stake_limit - total_occupied
+        if amount_dusk > headroom:
+            return jsonify({
+                "ok":     False,
+                "stderr": (
+                    f"Stake limit exceeded: limit={stake_limit:,.0f} DUSK, "
+                    f"currently occupied={total_occupied:,.2f} DUSK, "
+                    f"headroom={headroom:,.2f} DUSK, "
+                    f"requested={amount_dusk:,.2f} DUSK. "
+                    f"Reduce the amount or raise operator_stake_limit in config."
+                ),
+            }), 400
+    # ──────────────────────────────────────────────────────────────────────────
+
+    amount_lux = int(amount_dusk * 1_000_000_000)
 
     # Step 1: calculate payload
     r1 = operator_cmd(
@@ -936,6 +1019,58 @@ def provisioner_liquidate_terminate():
     return jsonify({"ok": r4["ok"], "step": "complete", "results": results})
 
 
+@app.route("/api/provisioner/liquidate", methods=["POST"])
+def provisioner_liquidate():
+    """
+    Liquidate only (does not terminate).
+    Body: { "password": "...", "provisioner_address": "..." }
+    """
+    data = request.get_json() or {}
+    pw   = data.get("password", "")
+    prov = data.get("provisioner_address", "")
+    if not prov:
+        return jsonify({"ok": False, "stderr": "provisioner_address required"}), 400
+
+    results = {}
+    r1 = operator_cmd(f"calculate-payload-liquidate --provisioner {prov}", timeout=30, password=pw)
+    results["liquidate_payload"] = r1
+    if not r1["ok"]:
+        return jsonify({"ok": False, "step": "liquidate_calculate_payload", "results": results})
+
+    payload_liq = extract_payload(r1["stdout"])
+    r2 = operator_cmd(
+        f"contract-call --contract-id {CONTRACT_ADDRESS()} --fn-name liquidate --fn-args '{payload_liq}' --gas-limit {GAS_LIMIT}",
+        timeout=60, password=pw)
+    results["liquidate_call"] = r2
+    return jsonify({"ok": r2["ok"], "step": "complete", "results": results})
+
+
+@app.route("/api/provisioner/terminate", methods=["POST"])
+def provisioner_terminate():
+    """
+    Terminate only (provisioner must already be liquidated / inactive).
+    Body: { "password": "...", "provisioner_address": "..." }
+    """
+    data = request.get_json() or {}
+    pw   = data.get("password", "")
+    prov = data.get("provisioner_address", "")
+    if not prov:
+        return jsonify({"ok": False, "stderr": "provisioner_address required"}), 400
+
+    results = {}
+    r1 = operator_cmd(f"calculate-payload-terminate --provisioner {prov}", timeout=30, password=pw)
+    results["terminate_payload"] = r1
+    if not r1["ok"]:
+        return jsonify({"ok": False, "step": "terminate_calculate_payload", "results": results})
+
+    payload_term = extract_payload(r1["stdout"])
+    r2 = operator_cmd(
+        f"contract-call --contract-id {CONTRACT_ADDRESS()} --fn-name terminate --fn-args '{payload_term}' --gas-limit {GAS_LIMIT}",
+        timeout=60, password=pw)
+    results["terminate_call"] = r2
+    return jsonify({"ok": r2["ok"], "step": "complete", "results": results})
+
+
 @app.route("/api/provisioner/remove_provisioner", methods=["POST"])
 def provisioner_remove_provisioner():
     """
@@ -996,8 +1131,8 @@ def provisioner_remove_provisioner():
             return jsonify({"ok": False, "step": "terminate_call", "results": results})
         time.sleep(8)
 
-    # Step 1b: maturing or inactive with stake → deactivate
-    elif has_stake and status in ("maturing", "inactive"):
+    # Step 1b: maturing, seeded, or inactive with stake → deactivate
+    elif has_stake and status in ("maturing", "seeded", "inactive"):
         r1 = operator_cmd(f"calculate-payload-stake-deactivate --provisioner {prov}", timeout=30, password=pw)
         results["deactivate_payload"] = r1
         if not r1["ok"]:
@@ -1129,12 +1264,11 @@ def parse_stake_info(output: str, current_tip: int = 0) -> dict:
     """
     Parse stake-info wallet output into structured data.
 
-    Status logic (matches provisioner_manager):
-      - no stake                         → inactive (0 trans)
-      - tip < active_block               → maturing (N trans)
-      - tip >= active_block              → active (N trans)
-      - active_block unknown, trans < 2  → maturing
-      - active_block unknown, trans >= 2 → active
+    Status logic:
+      - no stake                         → inactive  (no stake at all)
+      - has stake, 0 transitions         → seeded    (staked but not yet seen an epoch boundary)
+      - has stake, 1 transition          → maturing  (seen 1 epoch, building stake key)
+      - has stake, 2+ transitions        → active    (fully active in consensus)
     """
     import re as _re
     result = {
@@ -1154,12 +1288,14 @@ def parse_stake_info(output: str, current_tip: int = 0) -> dict:
     # Strip ANSI/VT100 escape sequences (e.g. \x1b[?25h cursor-show, colour codes)
     output = _re.sub(r'\x1b\[[\d;?]*[A-Za-z]', '', output)
     output = _re.sub(r'\x1b[()][A-Z0-9]', '', output)  # charset escapes
-    if "A stake does not exist" in output:
-        return result
 
+    # Always parse staking address — it appears even when no stake exists
     m_addr = _re.search(r"Staking address:\s*([A-Za-z0-9]{40,})", output)
     if m_addr:
         result["staking_address"] = m_addr.group(1).strip()
+
+    if "A stake does not exist" in output:
+        return result
 
     m = _re.search(r"Eligible stake:\s*([\d,]+(?:\.\d+)?)\s*DUSK", output)
     if m:
@@ -1191,35 +1327,36 @@ def parse_stake_info(output: str, current_tip: int = 0) -> dict:
 
     t = result["transitions"]  # may be None
 
-    # Status rules (exact match to provisioner_manager):
-    #   0 trans (or unknown) → inactive
-    #   1 trans              → maturing
-    #   2+ trans             → active
-    # Primary: use active_block vs tip for accuracy
+    # Status rules:
+    #   no stake                  → inactive
+    #   has stake, 0 trans        → seeded    (staked, awaiting first epoch boundary)
+    #   has stake, 1 trans        → maturing  (seen 1 transition, building stake key)
+    #   has stake, 2+ trans       → active    (fully participates in consensus)
+    # Primary signal: active_block vs current tip (most accurate)
     # Fallback: transitions counter
     if result["active_block"] is not None and current_tip > 0:
         if current_tip >= result["active_block"]:
             result["status"] = "active"
         else:
-            # How many transitions has this stake seen?
-            # active_block is start of active_epoch; each epoch = EPOCH_BLOCKS
             stake_epoch   = result["active_epoch"] - 2
             current_epoch = current_tip // EPOCH_BLOCKS
             seen = max(0, current_epoch - stake_epoch)
-            if seen == 0:
-                result["status"] = "inactive"
-            else:
-                result["status"] = "maturing"
             result["transitions"] = seen
+            if seen == 0:
+                result["status"] = "seeded"
+            elif seen == 1:
+                result["status"] = "maturing"
+            else:
+                result["status"] = "maturing"  # active_block not yet reached
     elif t is not None:
         if t == 0:
-            result["status"] = "inactive"
+            result["status"] = "seeded"
         elif t == 1:
             result["status"] = "maturing"
         else:
             result["status"] = "active"
     else:
-        result["status"] = "inactive"
+        result["status"] = "seeded"  # has stake but transitions unknown → assume seeded
 
     t = result["transitions"]  # refresh after possible update
     s = result["status"]
@@ -1227,6 +1364,8 @@ def parse_stake_info(output: str, current_tip: int = 0) -> dict:
         result["status_label"] = f"active ({t if t is not None else 2}+ trans)"
     elif s == "maturing":
         result["status_label"] = f"maturing ({t if t is not None else 1} trans)"
+    elif s == "seeded":
+        result["status_label"] = f"seeded ({t if t is not None else 0} trans)"
     else:
         result["status_label"] = f"inactive ({t if t is not None else 0} trans)"
 
@@ -1289,8 +1428,83 @@ def provisioner_live():
     })
 
 
+# ── Node sync status ──────────────────────────────────────────────────────────
 
-# ── Rotation Manager ─────────────────────────────────────────────────────────
+def _read_node_height(log_path: str, tail_lines: int = 500) -> dict:
+    """
+    Read the most recent 'block accepted' height from a rusk node log file.
+    Uses a shell pipeline to strip ANSI colour codes before matching — the rusk
+    log embeds escape sequences that break pure-Python regex matching.
+    Returns: { "height": int|None, "ok": bool, "error": str|None }
+    """
+    import subprocess as _sp
+    if not log_path:
+        return {"height": None, "ok": False, "error": "no log path configured"}
+    cmd = (
+        f"grep -a 'block accepted' {log_path} "
+        f"| sed 's/\\x1b\\[[0-9;]*m//g' "
+        f"| tail -1 "
+        f"| grep -oP 'height=\\K[0-9]+'"
+    )
+    try:
+        r = _sp.run(cmd, shell=True, capture_output=True, text=True, timeout=8)
+        val = r.stdout.strip()
+        if val:
+            return {"height": int(val), "ok": True, "error": None}
+        return {"height": None, "ok": True, "error": "no block accepted events in log"}
+    except FileNotFoundError:
+        return {"height": None, "ok": False, "error": f"log not found: {log_path}"}
+    except Exception as e:
+        return {"height": None, "ok": False, "error": str(e)}
+
+
+@app.route("/api/nodes/sync", methods=["GET"])
+def nodes_sync():
+    """
+    Return current block height for each local rusk node instance, read from log files.
+    Also returns the network tip for sync delta calculation.
+    Response: { "network_tip": N, "nodes": { "0": {"height": N, "ok": bool, "error": "..."}, ... } }
+    """
+    import urllib.request as _ur, json as _j, concurrent.futures as _cf
+
+    # Network tip (public testnet)
+    network_tip = None
+    try:
+        q = '{ block(height: -1) { header { height } } }'
+        req = _ur.Request(GRAPHQL_URL, data=q.encode(),
+                          headers={"rusk-version": RUSK_VERSION,
+                                   "Content-Type": "application/graphql"},
+                          method="POST")
+        with _ur.urlopen(req, timeout=6) as r:
+            p = _j.loads(r.read())
+        b = p.get("block") or p.get("data", {}).get("block", {})
+        network_tip = int(b["header"]["height"])
+    except Exception:
+        pass
+
+    # Read each node's log in parallel
+    log_paths = {
+        idx: cfg(f"node_{idx}_log") or ""
+        for idx in NODE_INDICES
+    }
+    results = {}
+    with _cf.ThreadPoolExecutor(max_workers=len(NODE_INDICES)) as ex:
+        futs = {ex.submit(_read_node_height, log_paths[idx]): idx
+                for idx in NODE_INDICES}
+        for fut, idx in futs.items():
+            try:
+                results[str(idx)] = fut.result(timeout=8)
+            except Exception as e:
+                results[str(idx)] = {"height": None, "ok": False, "error": str(e)}
+
+    return jsonify({
+        "ok":          True,
+        "network_tip": network_tip,
+        "nodes":       results,
+    })
+
+
+
 #
 # While enabled, a background thread assesses provisioner state every 15s and
 # dispatches to one of two functions:
@@ -1302,7 +1516,7 @@ def provisioner_live():
 
 _rotation_state: dict = {
     "enabled":       _load_rotation_enabled(),  # restored from disk on startup
-    "state":         "idle",   # idle | assessing | rotating | recovering | error
+    "state":         "idle",   # idle | assessing | rotating | recovering | error | tripped
     "step":          "",
     "last_error":    None,
     "epoch_rotated": None,     # epoch number when rotation was last completed
@@ -1310,6 +1524,10 @@ _rotation_state: dict = {
     "warmup":        True,      # first tick after enable: assess-only, no actions
     "irregular_streak": 0,    # consecutive ticks seeing irregular state
     "log":           deque(maxlen=200),
+    # Circuit breaker — stops rotation after N consecutive failures of same op
+    "cb_op":         None,     # last operation attempted
+    "cb_count":      0,        # consecutive failures for that op
+    "cb_tripped":    False,    # True = rotation halted by circuit breaker
 }
 # Log startup state so it's visible in the rotation log
 if _rotation_state["enabled"]:
@@ -1364,6 +1582,41 @@ def _rset(state: str, step: str = ""):
     _rotation_state["step"]  = step
 
 
+CB_LIMIT = 3  # consecutive failures before tripping
+
+def _cb_ok(op: str):
+    """Report a successful operation — resets circuit breaker for that op."""
+    if _rotation_state["cb_op"] == op:
+        _rotation_state["cb_count"] = 0
+        _rotation_state["cb_op"]    = None
+
+def _cb_fail(op: str) -> bool:
+    """
+    Report a failed operation. Returns True if the circuit breaker just tripped
+    (caller should halt rotation). After CB_LIMIT consecutive failures of the
+    same op the breaker trips, sets state=tripped, disables rotation.
+    """
+    rs = _rotation_state
+    if rs["cb_op"] != op:
+        rs["cb_op"]   = op
+        rs["cb_count"] = 0
+    rs["cb_count"] += 1
+    if rs["cb_count"] >= CB_LIMIT:
+        rs["cb_tripped"] = True
+        rs["enabled"]    = False
+        _save_rotation_enabled(False)
+        msg = (f"CIRCUIT BREAKER TRIPPED — operation '{op}' failed "
+               f"{rs['cb_count']}x in a row. Auto-rotation DISABLED. "
+               f"Fix the underlying issue then re-enable manually.")
+        _rlog(msg, "error")
+        _rset("tripped", op)
+        return True
+    remaining = CB_LIMIT - rs["cb_count"]
+    _rlog(f"circuit breaker: '{op}' failed ({rs['cb_count']}/{CB_LIMIT}) — "
+          f"{remaining} attempt(s) remaining before halt", "warn")
+    return False
+
+
 # ── State assessment ──────────────────────────────────────────────────────────
 
 def _assess_state(tip: int, pw: str) -> dict:
@@ -1373,9 +1626,10 @@ def _assess_state(tip: int, pw: str) -> dict:
         {
             "active":   [node_dict, ...],
             "maturing": [node_dict, ...],
-            "inactive": [node_dict, ...],
+            "seeded":   [node_dict, ...],   # has stake, 0 transitions — awaiting first epoch
+            "inactive": [node_dict, ...],   # includes seeded for rotation-logic compatibility
             "regular":  bool,   # True iff A:1 & M:1
-            "label":    str,    # human-readable "A:1 M:1 I:0" etc.
+            "label":    str,    # human-readable "A:1 M:1 S:1 I:0" etc.
         }
     """
     nodes    = {}
@@ -1394,17 +1648,26 @@ def _assess_state(tip: int, pw: str) -> dict:
         info["idx"] = idx
         nodes[idx]  = info
 
-    active   = [n for n in nodes.values() if n["status"] == "active"]
-    maturing = [n for n in nodes.values() if n["status"] == "maturing"]
-    inactive = [n for n in nodes.values() if n["status"] == "inactive"]
+    active         = [n for n in nodes.values() if n["status"] == "active"]
+    maturing       = [n for n in nodes.values() if n["status"] == "maturing"]
+    seeded         = [n for n in nodes.values() if n["status"] == "seeded"]
+    truly_inactive = [n for n in nodes.values() if n["status"] == "inactive"]
+    # Rotation logic treats seeded same as inactive (no stake key yet, can be deactivated)
+    inactive = seeded + truly_inactive
     regular  = (len(active) == 1 and len(maturing) == 1)
+
+    label = f"A:{len(active)} M:{len(maturing)}"
+    if seeded:
+        label += f" S:{len(seeded)}"
+    label += f" I:{len(truly_inactive)}"
 
     return {
         "active":   active,
         "maturing": maturing,
+        "seeded":   seeded,
         "inactive": inactive,
         "regular":  regular,
-        "label":    f"A:{len(active)} M:{len(maturing)} I:{len(inactive)}",
+        "label":    label,
     }
 
 
@@ -1901,20 +2164,14 @@ def stake_rotation(state: dict, tip: int, pw: str):
         return
 
 
-def _seed_from_pool(idx: int, seed_dusk: float, pw: str) -> tuple:
+def _seed_from_pool(idx: int, seed_dusk: float, pw: str,
+                    occupied_dusk: float = 0.0, stake_limit: float = 0.0) -> tuple:
     """
     Seed provisioner idx with exactly seed_dusk DUSK from pool balance.
 
-    The contract enforces a minimum stake of seed_dusk (1k DUSK) — partial amounts
-    are rejected with "staked value is lower than the minimum amount". So we only
-    proceed when pool >= seed_dusk; otherwise we wait silently without submitting
-    any transaction (no mempool spam).
-
-    Behaviour:
-      - pool < seed_dusk: logs and returns (False, 0) — no tx submitted.
-      - pool >= seed_dusk: stakes exactly seed_dusk DUSK.
-        Active provisioner stays active until this succeeds and the inactive
-        slot transitions to maturing.
+    Checks:
+      - pool >= seed_dusk (contract minimum)
+      - occupied_dusk + seed_dusk <= stake_limit (operator cap, if stake_limit > 0)
 
     Returns (ok: bool, staked_dusk: float).
     """
@@ -1925,8 +2182,22 @@ def _seed_from_pool(idx: int, seed_dusk: float, pw: str) -> tuple:
               f"Active provisioner stays active until pool refills.")
         return False, 0.0
 
+    if stake_limit > 0:
+        headroom = stake_limit - occupied_dusk
+        if headroom < seed_dusk:
+            _rlog(f"prov[{idx}] seed skipped — operator_stake_limit ({stake_limit:.0f} DUSK) "
+                  f"already occupied ({occupied_dusk:.0f} DUSK); headroom {headroom:.0f} DUSK "
+                  f"< seed {seed_dusk:.0f} DUSK. Raise operator_stake_limit or reclaim slashed "
+                  f"funds (recycle) to free capacity.", "warn")
+            return False, 0.0
+
     amount_lux = int(seed_dusk * 100) * 10_000_000   # round to 0.01 DUSK
     ok = _stake_lux(idx, amount_lux, pw)
+    op = f"seed_prov{idx}"
+    if ok:
+        _cb_ok(op)
+    else:
+        _cb_fail(op)
     return ok, seed_dusk if ok else 0.0
 
 
@@ -1958,6 +2229,19 @@ def recover_stake_rotation(state: dict, tip: int, pw: str):
     combined_slashed = (act.get("slashed_dusk", 0.0)
                         + mat.get("slashed_dusk", 0.0))
 
+    # Total DUSK currently locked across all provisioners (staked + slashed)
+    total_occupied = sum(
+        p.get("amount_dusk", 0.0) + p.get("slashed_dusk", 0.0)
+        for p in (active + maturing + inactive)
+    )
+
+    # Circuit breaker — halt if tripped
+    if _rotation_state.get("cb_tripped"):
+        _rlog("circuit breaker tripped — rotation halted. Re-enable manually after "
+              "fixing the underlying issue.", "error")
+        _rset("tripped", _rotation_state.get("cb_op", ""))
+        return
+
     _rlog(f"recover: state={state['label']}", "warn")
 
     # ── A:2 M:0 I:0 — liq+term the one with more transitions ─────────────────
@@ -1975,15 +2259,17 @@ def recover_stake_rotation(state: dict, tip: int, pw: str):
               f"(transitions={to_rm.get('transitions')}), keep prov[{to_keep['idx']}]")
         _rset("recovering", f"liq+term prov[{to_rm['idx']}]")
         ok, _ = _do_liquidate_terminate(addr, to_rm["idx"], pw)
+        op_lt = f"liqterm_prov{to_rm['idx']}"
         if not ok:
-            _rset("error")
-            _rotation_state["last_error"] = "A:2 liq+term failed"
-            return
+            if _cb_fail(op_lt): return
+            _rset("error"); _rotation_state["last_error"] = "A:2 liq+term failed"; return
+        _cb_ok(op_lt)
         _rlog(f"A:2 → seeding prov[{to_rm['idx']}] with up to {seed_dusk:.0f} DUSK from pool")
-        ok, _ = _seed_from_pool(to_rm["idx"], seed_dusk, pw)
+        ok, _ = _seed_from_pool(to_rm["idx"], seed_dusk, pw,
+                                occupied_dusk=total_occupied - (to_rm.get("amount_dusk",0)+to_rm.get("slashed_dusk",0)),
+                                stake_limit=stake_limit)
         if not ok:
-            _rset("idle")   # pool empty or tx failed — retry next tick
-            return
+            _rset("idle"); return
         _rlog("A:2 recovery done — expecting A:1 I:1 → A:1 M:1 after transition")
         _rset("idle")
         return
@@ -2008,10 +2294,11 @@ def recover_stake_rotation(state: dict, tip: int, pw: str):
             _rlog(f"I:2 both seeded — deactivating prov[{to_deact['idx']}] to prevent A:2")
             _rset("recovering", f"deactivate prov[{to_deact['idx']}]")
             ok = _do_deactivate(addr, to_deact["idx"], pw)
+            op_d = f"deactivate_prov{to_deact['idx']}"
             if not ok:
-                _rset("error")
-                _rotation_state["last_error"] = "I:2 deactivate failed"
-                return
+                if _cb_fail(op_d): return
+                _rset("error"); _rotation_state["last_error"] = "I:2 deactivate failed"; return
+            _cb_ok(op_d)
             _rlog("I:2 both-seeded recovery done — now I:1 seeded + I:1 empty → "
                   "seed empty next tick → M:1 I:1 → A:1 M:1")
             _rset("idle")
@@ -2030,10 +2317,10 @@ def recover_stake_rotation(state: dict, tip: int, pw: str):
         _rlog(f"I:2 both empty — staking prov[{target['idx']}] only "
               f"({seed_dusk:.0f} DUSK). Will seed other after transition.")
         _rset("recovering", f"seed prov[{target['idx']}]")
-        ok, _ = _seed_from_pool(target["idx"], seed_dusk, pw)
+        ok, _ = _seed_from_pool(target["idx"], seed_dusk, pw,
+                                occupied_dusk=total_occupied, stake_limit=stake_limit)
         if not ok:
-            _rset("idle")
-            return
+            _rset("idle"); return
         _rlog("I:2 step done — expecting M:1 I:1 → seed other → A:1 M:1")
         _rset("idle")
         return
@@ -2067,10 +2354,11 @@ def recover_stake_rotation(state: dict, tip: int, pw: str):
               f"(transitions={to_deact.get('transitions')}) to prevent A:2")
         _rset("recovering", f"deactivate prov[{to_deact['idx']}]")
         ok = _do_deactivate(addr, to_deact["idx"], pw)
+        op_d2 = f"deactivate_prov{to_deact['idx']}"
         if not ok:
-            _rset("error")
-            _rotation_state["last_error"] = "M:2 deactivate failed"
-            return
+            if _cb_fail(op_d2): return
+            _rset("error"); _rotation_state["last_error"] = "M:2 deactivate failed"; return
+        _cb_ok(op_d2)
         time.sleep(5)
         # Top up surviving maturing provisioner from pool
         rot_win  = int(cfg("rotation_window") or 100)
@@ -2096,38 +2384,42 @@ def recover_stake_rotation(state: dict, tip: int, pw: str):
     # ── A:1 M:0 I:1 — seed inactive, top up active while waiting ────────────
     if n_a == 1 and n_m == 0 and n_i == 1:
         target = inactive[0]
-        if target.get("amount_dusk", 0.0) >= seed_dusk:
+        inactive_needs_seed = target.get("amount_dusk", 0.0) < seed_dusk
+
+        if not inactive_needs_seed:
             _rlog(f"A:1 M:0 I:1 — prov[{target['idx']}] already seeded, "
                   f"waiting for transition")
         else:
-            # Seed from pool — no tx if pool < seed_dusk (contract minimum)
+            # Seed inactive FIRST — always takes priority over active top-up
             _rset("recovering", f"seed prov[{target['idx']}]")
-            ok, _ = _seed_from_pool(target["idx"], seed_dusk, pw)
-            if not ok:
-                # Pool insufficient — active stays active, still try active top-up below
-                pass
-            else:
+            ok, _ = _seed_from_pool(target["idx"], seed_dusk, pw,
+                                    occupied_dusk=total_occupied, stake_limit=stake_limit)
+            if ok:
                 _rlog("A:1 M:0 I:1 — inactive seeded, topping up active while waiting")
+                inactive_needs_seed = False  # just seeded successfully
 
-        # Top up active from pool regardless — inactive just needs to transition,
-        # active has headroom and the pool may have available DUSK.
+        # Top up active — reserve seed_dusk in capacity if inactive still unseeded
+        seed_reserve        = seed_dusk if inactive_needs_seed else 0.0
         staked_total        = act.get("amount_dusk", 0.0) + target.get("amount_dusk", 0.0)
         pool_dusk           = _query_pool_balance_dusk(staked_total)
         act_occupied        = act.get("amount_dusk", 0.0) + act.get("slashed_dusk", 0.0)
         inact_occupied      = target.get("amount_dusk", 0.0) + target.get("slashed_dusk", 0.0)
         slash_headroom_dusk = max(0.0, max_slash_dusk - combined_slashed)
         max_topup_act_dusk  = slash_headroom_dusk / 0.10
-        act_capacity        = max(0.0, stake_limit - act_occupied - inact_occupied)
+        # Subtract seed_reserve so active top-up never consumes the 1k needed for inactive
+        act_capacity        = max(0.0, stake_limit - act_occupied - inact_occupied - seed_reserve)
         topup_dusk          = min(pool_dusk, min(max_topup_act_dusk, act_capacity))
 
         if pool_dusk >= 1 and topup_dusk >= 1:
+            suffix = f", {seed_reserve:.0f} DUSK reserved for inactive seed" if seed_reserve else ""
             _rlog(f"A:1 M:0 I:1 — top-up active prov[{act['idx']}] {topup_dusk:.2f} DUSK "
-                  f"(slash budget remaining: {slash_headroom_dusk:.2f} DUSK)")
+                  f"(slash budget remaining: {slash_headroom_dusk:.2f} DUSK{suffix})")
             _stake_lux(act["idx"], int(topup_dusk * 100) * 10_000_000, pw)
         elif pool_dusk >= 1:
             reason = ("slash limit reached"
                       if slash_headroom_dusk < 0.10
-                      else f"at capacity ({act_occupied:.0f}+{inact_occupied:.0f}/{stake_limit:.0f} DUSK)")
+                      else f"at capacity ({act_occupied:.0f}+{inact_occupied:.0f}"
+                           f"+{seed_reserve:.0f} reserved/{stake_limit:.0f} DUSK)")
             _rlog(f"A:1 M:0 I:1 — active prov[{act['idx']}] no top-up: {reason}")
 
         _rlog("A:1 M:0 I:1 recovery done — expecting A:1 M:1 after transition")
@@ -2145,7 +2437,8 @@ def recover_stake_rotation(state: dict, tip: int, pw: str):
                   f"waiting for transition")
         else:
             _rset("recovering", f"seed prov[{target['idx']}]")
-            ok, _ = _seed_from_pool(target["idx"], seed_dusk, pw)
+            ok, _ = _seed_from_pool(target["idx"], seed_dusk, pw,
+                                occupied_dusk=total_occupied, stake_limit=stake_limit)
             if ok:
                 time.sleep(5)
         # Top up maturing from pool (epoch_state_regular only)
@@ -2179,6 +2472,10 @@ def recover_stake_rotation(state: dict, tip: int, pw: str):
 # ── Main tick ─────────────────────────────────────────────────────────────────
 
 def _rotation_tick():
+    # Always reload config from disk so changes to the JSON file take effect
+    # immediately without requiring a server restart.
+    _load_config()
+
     pw = get_password()
     if not pw:
         _rlog("no password cached — skipping tick", "warn")
@@ -2276,11 +2573,14 @@ def rotation_status():
 
 @app.route("/api/rotation/enable", methods=["POST"])
 def rotation_enable():
-    _rotation_state["enabled"] = True
-    _rotation_state["warmup"]  = True
+    _rotation_state["enabled"]    = True
+    _rotation_state["warmup"]     = True
+    _rotation_state["cb_tripped"] = False
+    _rotation_state["cb_op"]      = None
+    _rotation_state["cb_count"]   = 0
     _rset("idle")
     _save_rotation_enabled(True)
-    _rlog("rotation ENABLED — first tick will assess state only, no actions")
+    _rlog("rotation ENABLED — circuit breaker reset — first tick will assess state only, no actions")
     return jsonify({"ok": True, "enabled": True})
 
 @app.route("/api/rotation/disable", methods=["POST"])
@@ -2314,6 +2614,7 @@ def get_config():
     sks = _load_sks()
     safe["prov_0_sk_set"] = bool(sks.get("prov_0_sk"))
     safe["prov_1_sk_set"] = bool(sks.get("prov_1_sk"))
+    safe["prov_2_sk_set"] = bool(sks.get("prov_2_sk"))
     return jsonify(safe)
 
 @app.route("/api/config", methods=["POST"])
@@ -2350,11 +2651,16 @@ def set_config():
         current["prov_0_address"] = str(data["prov_0_address"]).strip()
     if "prov_1_address" in data:
         current["prov_1_address"] = str(data["prov_1_address"]).strip()
+    if "prov_2_address" in data:
+        current["prov_2_address"] = str(data["prov_2_address"]).strip()
+    for key in ("node_0_log", "node_1_log", "node_2_log"):
+        if key in data:
+            current[key] = str(data[key]).strip()
     _save_config(current)
     # Handle SK updates separately (stored in protected file)
     sk_updated = False
     sks = _load_sks()
-    for key in ("prov_0_sk", "prov_1_sk"):
+    for key in ("prov_0_sk", "prov_1_sk", "prov_2_sk"):
         if key in data and data[key]:
             sks[key] = str(data[key]).strip()
             sk_updated = True
@@ -2364,6 +2670,7 @@ def set_config():
     sks_now = _load_sks()
     safe["prov_0_sk_set"] = bool(sks_now.get("prov_0_sk"))
     safe["prov_1_sk_set"] = bool(sks_now.get("prov_1_sk"))
+    safe["prov_2_sk_set"] = bool(sks_now.get("prov_2_sk"))
     return jsonify({"ok": True, "config": safe})
 
 @app.route("/api/config/reset", methods=["POST"])
@@ -2379,6 +2686,7 @@ def reset_config():
 # SSE clients track by index so new items are always correctly detected.
 _event_log: list = []
 _event_log_lock = threading.Lock()
+_event_seen: set = set()   # persistent dedup — survives poller restarts
 _poller_errors: deque = deque(maxlen=50)   # visible error log
 
 # Failed-transaction log — separate from contract events.
@@ -2488,14 +2796,19 @@ _backfill_progress: dict = {"done": 0, "total": 0, "running": False}  # backfill
 
 
 def _log_event(entry: dict):
+    """Append event to log, deduplicating by (height, source, topic)."""
+    dedup_key = (entry.get("height"), entry.get("_source",""), entry.get("topic",""))
     with _event_log_lock:
+        if dedup_key in _event_seen:
+            return
+        _event_seen.add(dedup_key)
         _event_log.append(entry)
         # trim to last 500
         if len(_event_log) > 500:
             del _event_log[:-500]
 
 
-def _sozu_poller(backfill: int = 0):
+def _sozu_poller(backfill: int = 0, parallel: int = 10):
     """Background thread: poll new blocks and push SOZU events to log.
     backfill: number of past blocks to scan before watching live.
     """
@@ -2583,8 +2896,7 @@ def _sozu_poller(backfill: int = 0):
             return {"_raw": raw[:200]}
 
     last = None
-    seen_events: set = set()   # (height, source, topic) dedup
-    _log(f"[poller] started — {GRAPHQL_URL}")
+    _log(f"[poller] started — {GRAPHQL_URL}  parallel={parallel}")
     while _poller_running:
         try:
             tip = fetch_tip()
@@ -2599,56 +2911,74 @@ def _sozu_poller(backfill: int = 0):
             blocks_scanned = 0
             events_found   = 0
             is_backfilling = _backfill_progress["running"]
+
+            from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _AC
+
+            BATCH = parallel if is_backfilling else 1  # parallel only during backfill
+
+            def _decode_ev(ev, h):
+                topic    = ev.get("topic", "")
+                data_hex = ev.get("data", "")
+                decoded  = decode(topic, data_hex)
+                op = decoded.get("operation", "") if isinstance(decoded, dict) else ""
+                display_topic = f"{topic}-{op}" if op else topic
+                return ev, topic, data_hex, decoded, display_topic, h
+
+            def _fetch_block(h):
+                evs = fetch_events(h)
+                decoded_evs = []
+                if evs:
+                    with _TPE(max_workers=min(len(evs), 8)) as _ex:
+                        decoded_evs = list(_ex.map(lambda ev: _decode_ev(ev, h), evs))
+                return h, decoded_evs
+
             while last < tip:
-                h = last + 1
-                try:
-                    evs = fetch_events(h)
-                    # Only fetch failed txs for live blocks — skip during backfill
-                    # to avoid doubling the backfill time with an extra call per block.
+                # Build batch of up to BATCH blocks
+                batch_heights = []
+                while last < tip and len(batch_heights) < BATCH:
+                    batch_heights.append(last + 1)
+                    last += 1
+
+                # Fetch all blocks in batch concurrently
+                batch_results = {}  # height -> decoded_evs
+                with _TPE(max_workers=BATCH) as _ex:
+                    futs = {_ex.submit(_fetch_block, h): h for h in batch_heights}
+                    for fut in _AC(futs):
+                        h = futs[fut]
+                        try:
+                            bh, decoded_evs = fut.result()
+                            batch_results[bh] = decoded_evs
+                        except Exception as e:
+                            _poller_errors.append({"ts": datetime.now().isoformat(),
+                                                   "block": h, "error": str(e)})
+                            _log(f"[poller] ERROR block={h}: {e}")
+                            batch_results[h] = []
+
+                # Process results in order (ascending height)
+                for h in sorted(batch_results.keys()):
+                    decoded_evs = batch_results[h]
                     if not is_backfilling:
                         try:
                             fetch_and_log_tx_errors(h)
                         except Exception as _te:
                             _log(f"[poller] tx-error fetch failed block={h}: {_te}")
                     blocks_scanned += 1
-                    def _decode_ev(ev):
-                        topic    = ev.get("topic", "")
-                        data_hex = ev.get("data", "")
-                        decoded  = decode(topic, data_hex)
-                        op = decoded.get("operation", "") if isinstance(decoded, dict) else ""
-                        display_topic = f"{topic}-{op}" if op else topic
-                        return ev, topic, data_hex, decoded, display_topic
-
-                    from concurrent.futures import ThreadPoolExecutor as _TPE
-                    if not evs:
-                        decoded_evs = []
-                    else:
-                        with _TPE(max_workers=min(len(evs), 8)) as _ex:
-                            decoded_evs = list(_ex.map(_decode_ev, evs))
-
-                    for ev, topic, data_hex, decoded, display_topic in decoded_evs:
+                    for ev, topic, data_hex, decoded, display_topic, _ in decoded_evs:
                         entry = {
                             "ts":      datetime.now().strftime("%H:%M:%S"),
                             "height":  h,
                             "topic":   display_topic,
                             "decoded": decoded,
-                            "data":    data_hex,   # raw hex for highlight matching
+                            "data":    data_hex,
+                            "_source": ev.get("source", ""),
                         }
-                        dedup_key = (h, ev.get("source",""), topic)
-                        if dedup_key not in seen_events:
-                            seen_events.add(dedup_key)
-                            _log_event(entry)
-                            events_found += 1
-                            _log(f"[poller] block={h}  {display_topic}")
-                except Exception as e:
-                    _poller_errors.append({"ts": datetime.now().isoformat(),
-                                           "block": h, "error": str(e)})
-                    _log(f"[poller] ERROR block={h}: {e}")
-                last = h
+                        _log_event(entry)
+                        events_found += 1
+                        _log(f"[poller] block={h}  {display_topic}")
+
                 if is_backfilling:
                     _backfill_progress["done"] = blocks_scanned
-                    # Rate-limit during backfill to avoid testnet throttling
-                    time.sleep(0.15)
+
             if is_backfilling and blocks_scanned > 0:
                 _backfill_progress.update({"done": blocks_scanned, "running": False})
                 _log(f"[poller] scan done: {blocks_scanned} blocks, {events_found} events")
@@ -2658,11 +2988,11 @@ def _sozu_poller(backfill: int = 0):
         time.sleep(4)
 
 
-def _start_poller(backfill: int = 0):
+def _start_poller(backfill: int = 0, parallel: int = 10):
     global _poller_running
     if not _poller_running:
         _poller_running = True
-        t = threading.Thread(target=_sozu_poller, kwargs={"backfill": backfill}, daemon=True)
+        t = threading.Thread(target=_sozu_poller, kwargs={"backfill": backfill, "parallel": parallel}, daemon=True)
         t.start()
 
 
@@ -2708,15 +3038,40 @@ def events_backfill():
     global _poller_running
     data   = request.get_json() or {}
     blocks = int(data.get("blocks", 100))
-    blocks = max(1, min(blocks, 5000))  # cap at 5000
+    blocks   = max(1, min(blocks, 50000))  # cap at 50k
+    parallel = int(data.get("parallel", 10))
+    parallel = max(1, min(parallel, 50))
 
     # stop existing poller
     _poller_running = False
     time.sleep(0.5)
 
+    # clear event log and dedup set so backfilled events render fresh
+    with _event_log_lock:
+        _event_log.clear()
+        _event_seen.clear()
+
+    # pre-mark as running so dashboard sees it before thread initialises
+    if blocks > 0:
+        _backfill_progress.update({"done": 0, "total": blocks, "running": True})
+
     # restart with backfill
-    _start_poller(backfill=blocks)
-    return jsonify({"ok": True, "backfill": blocks})
+    _poller_running = False  # ensure clean state before _start_poller check
+    _start_poller(backfill=blocks, parallel=parallel)
+    return jsonify({"ok": True, "backfill": blocks, "parallel": parallel})
+
+
+@app.route("/api/events/backfill_progress", methods=["GET"])
+def events_backfill_progress():
+    """Return current backfill progress."""
+    p = _backfill_progress
+    pct = int(p["done"] / p["total"] * 100) if p["total"] > 0 else 0
+    return jsonify({
+        "running": p["running"],
+        "done":    p["done"],
+        "total":   p["total"],
+        "pct":     pct,
+    })
 
 
 @app.route("/api/events/history", methods=["GET","POST"])
