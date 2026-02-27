@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Provisioner Dashboard  v0.5.18 -->
+<!-- Provisioner Dashboard  v0.6.0 -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -382,12 +382,27 @@
     transform: rotate(45deg);
   }
 
-  .topic-activate    { color: var(--green); }
-  .topic-deactivate  { color: var(--purple); }
-  .topic-reward-recycle  { color: var(--yellow); }
-  .topic-reward-terminate { color: var(--orange); }
-  .topic-deposit     { color: var(--cyan); }
-  .topic-unstake     { color: var(--teal); }
+  .topic-chip-all { color: var(--muted); }
+  .topic-chip {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    background: var(--bg3);
+    cursor: pointer;
+    opacity: .65;
+    transition: opacity .12s, border-color .12s, background .12s;
+    white-space: nowrap;
+  }
+  .topic-chip:hover  { opacity: 1; }
+  .topic-chip.active { opacity: 1; border-color: currentColor; background: var(--bg2); font-weight: 600; }
+  .topic-activate           { color: var(--green); }
+  .topic-deactivate         { color: var(--purple); }
+  .topic-reward-recycle     { color: var(--yellow); }
+  .topic-reward-terminate   { color: var(--orange); }
+  .topic-deposit            { color: var(--cyan); }
+  .topic-unstake            { color: var(--teal); }
   .topic-liquidate          { color: var(--red); }
   .topic-terminate          { color: var(--red); }
   .topic-add-provisioner    { color: var(--green); }
@@ -436,6 +451,7 @@
   }
   .prov-status.active   { color: var(--green); }
   .prov-status.maturing { color: var(--yellow); }
+  .prov-status.seeded   { color: var(--cyan); }
   .prov-status.inactive { color: var(--dim); }
   .prov-row {
     display: flex;
@@ -553,6 +569,8 @@
       <button class="nav-btn nav-btn-action" onclick="cmdListProvisioners()"><span class="dot"></span>list provisioners</button>
       <button class="nav-btn nav-btn-action" onclick="openModal('modal-alloc-stake')"><span class="dot"></span>allocate stake</button>
       <button class="nav-btn nav-btn-action" onclick="openModal('modal-deactivate')"><span class="dot"></span>deactivate stake</button>
+      <button class="nav-btn nav-btn-action" onclick="openModal('modal-liquidate')"><span class="dot"></span>liquidate</button>
+      <button class="nav-btn nav-btn-action" onclick="openModal('modal-terminate')"><span class="dot"></span>terminate</button>
       <button class="nav-btn nav-btn-action" onclick="openModal('modal-liq-term')"><span class="dot"></span>liquidate &amp; terminate</button>
       <button class="nav-btn nav-btn-action" onclick="openModal('modal-add-prov')"><span class="dot"></span>add provisioner</button>
       <button class="nav-btn nav-btn-action" onclick="openModal('modal-remove')"><span class="dot"></span>remove provisioner</button>
@@ -603,30 +621,116 @@
       <div class="col-title">SOZU Events</div>
       <div id="config-warning" style="display:none;font-size:10px;color:var(--yellow);cursor:pointer;" onclick="openModal('modal-config')">⚠ config incomplete</div>
       <div style="display:flex;align-items:center;gap:8px;">
-        <div style="display:flex;align-items:center;gap:4px;">
-          <input id="backfill-n" type="number" value="100" min="1" max="5000"
-                 style="width:64px;background:var(--bg3);border:1px solid var(--border);border-radius:3px;
-                        color:var(--text);font-family:'IBM Plex Mono',monospace;font-size:10px;
-                        padding:2px 6px;outline:none;text-align:right;"
-                 title="Number of blocks to backfill">
-          <span style="font-size:9px;color:var(--dim)">blk</span>
-          <button onclick="doBackfill()" id="backfill-btn" style="background:var(--bg3);border:1px solid var(--border);
-                  border-radius:3px;color:var(--cyan);font-family:'IBM Plex Mono',monospace;
-                  font-size:10px;padding:2px 8px;cursor:pointer;" title="Backfill N blocks">backfill</button>
-          <button onclick="togglePollerErrors()" id="errors-btn" style="background:var(--bg3);border:1px solid var(--border);
+        <div>
+          <button id="ev-filter-btn" onclick="toggleEvFilter()" style="background:var(--bg3);border:1px solid var(--border);
                   border-radius:3px;color:var(--dim);font-family:'IBM Plex Mono',monospace;
-                  font-size:10px;padding:2px 6px;cursor:pointer;" title="Show poller errors">errs</button>
-          <label class="mine-filter" title="Show only my events">
-            <input type="checkbox" id="events-mine-only" onchange="applyEventsMineFilter()">
-            mine only
-          </label>
+                  font-size:10px;padding:2px 8px;cursor:pointer;display:flex;align-items:center;gap:4px;"
+                  title="Filter &amp; options">
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" style="flex-shrink:0">
+              <path d="M1 2.5h8M2.5 5h5M4 7.5h2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+            </svg>
+            filter
+            <span id="ev-filter-badge" style="display:none;background:var(--cyan);color:var(--bg);
+                  border-radius:8px;padding:0 4px;font-size:9px;font-weight:700;"></span>
+          </button>
+
+          <!-- Filter dropdown panel -->
+          <div id="ev-filter-panel" style="display:none;position:fixed;
+               width:270px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;
+               z-index:1000;box-shadow:0 8px 24px rgba(0,0,0,.4);overflow:hidden;">
+
+            <!-- Topic filter -->
+            <div style="padding:10px 12px 8px;border-bottom:1px solid var(--border);">
+              <div style="font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);
+                          font-family:'IBM Plex Mono',monospace;margin-bottom:6px;">Topic</div>
+              <div style="display:flex;flex-wrap:wrap;gap:4px;" id="ev-topic-chips">
+                <button class="topic-chip topic-chip-all active" data-topic="" onclick="setTopicFilter(this,'')">all</button>
+                <button class="topic-chip topic-activate"        data-topic="activate"        onclick="setTopicFilter(this,'activate')">activate</button>
+                <button class="topic-chip topic-deactivate"      data-topic="deactivate"      onclick="setTopicFilter(this,'deactivate')">deactivate</button>
+                <button class="topic-chip topic-liquidate"       data-topic="liquidate"       onclick="setTopicFilter(this,'liquidate')">liquidate</button>
+                <button class="topic-chip topic-terminate"       data-topic="terminate"       onclick="setTopicFilter(this,'terminate')">terminate</button>
+                <button class="topic-chip topic-reward-recycle"  data-topic="reward-recycle"  onclick="setTopicFilter(this,'reward-recycle')">recycle</button>
+                <button class="topic-chip topic-reward-terminate" data-topic="reward-terminate" onclick="setTopicFilter(this,'reward-terminate')">reward-term</button>
+                <button class="topic-chip topic-deposit"         data-topic="deposit"         onclick="setTopicFilter(this,'deposit')">deposit</button>
+                <button class="topic-chip topic-unstake"         data-topic="unstake"         onclick="setTopicFilter(this,'unstake')">unstake</button>
+                <button class="topic-chip topic-add-provisioner" data-topic="add_provisioner" onclick="setTopicFilter(this,'add_provisioner')">add-prov</button>
+                <button class="topic-chip topic-remove-provisioner" data-topic="remove_provisioner" onclick="setTopicFilter(this,'remove_provisioner')">rem-prov</button>
+              </div>
+            </div>
+
+            <!-- Block filter -->
+            <div style="padding:10px 12px 8px;border-bottom:1px solid var(--border);">
+              <div style="font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);
+                          font-family:'IBM Plex Mono',monospace;margin-bottom:6px;">Block</div>
+              <div style="display:flex;align-items:center;gap:6px;">
+                <input id="ev-block-filter" type="number" placeholder="e.g. 2721607" min="1"
+                       oninput="applyEventsFilter()"
+                       style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:3px;
+                              color:var(--text);font-family:'IBM Plex Mono',monospace;font-size:10px;
+                              padding:3px 7px;outline:none;min-width:0;">
+                <button onclick="document.getElementById('ev-block-filter').value='';applyEventsFilter()"
+                        style="background:var(--bg3);border:1px solid var(--border);border-radius:3px;
+                               color:var(--dim);font-family:'IBM Plex Mono',monospace;font-size:10px;
+                               padding:2px 7px;cursor:pointer;white-space:nowrap;">clear</button>
+              </div>
+            </div>
+
+            <!-- Mine only + Errs -->
+            <div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;">
+              <label class="mine-filter" title="Show only my events" style="flex:1;">
+                <input type="checkbox" id="events-mine-only" onchange="applyEventsFilter()">
+                mine only
+              </label>
+              <button onclick="togglePollerErrors()" id="errors-btn" style="background:var(--bg3);border:1px solid var(--border);
+                      border-radius:3px;color:var(--dim);font-family:'IBM Plex Mono',monospace;
+                      font-size:10px;padding:2px 7px;cursor:pointer;" title="Show poller errors">errs</button>
+            </div>
+
+            <!-- Backfill -->
+            <div style="padding:8px 12px;display:flex;align-items:center;gap:6px;">
+              <span style="font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);
+                           font-family:'IBM Plex Mono',monospace;white-space:nowrap;">backfill</span>
+              <input id="backfill-n" type="number" value="100" min="1" max="5000"
+                     style="width:64px;background:var(--bg3);border:1px solid var(--border);border-radius:3px;
+                            color:var(--text);font-family:'IBM Plex Mono',monospace;font-size:10px;
+                            padding:3px 6px;outline:none;text-align:right;"
+                     title="Number of blocks to backfill">
+              <span style="font-size:9px;color:var(--dim)">blk</span>
+              <button onclick="doBackfill()" id="backfill-btn" style="background:var(--bg3);border:1px solid var(--border);
+                      border-radius:3px;color:var(--cyan);font-family:'IBM Plex Mono',monospace;
+                      font-size:10px;padding:2px 8px;cursor:pointer;flex:1;" title="Backfill N blocks">go</button>
+            </div>
+            <!-- Parallel requests -->
+            <div style="padding:0 12px 10px;display:flex;align-items:center;gap:6px;">
+              <span style="font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);
+                           font-family:'IBM Plex Mono',monospace;white-space:nowrap;">parallel</span>
+              <input id="backfill-parallel" type="number" value="10" min="1" max="50"
+                     style="width:48px;background:var(--bg3);border:1px solid var(--border);border-radius:3px;
+                            color:var(--text);font-family:'IBM Plex Mono',monospace;font-size:10px;
+                            padding:3px 6px;outline:none;text-align:right;"
+                     title="Simultaneous block requests during backfill">
+              <span style="font-size:9px;color:var(--dim)">req</span>
+            </div>
+
+          </div><!-- /ev-filter-panel -->
         </div>
-        <div class="status-chip" style="font-family:'IBM Plex Mono',monospace; font-size:10px;">
+
+        <div class="status-chip" id="events-stream-chip" style="font-family:'IBM Plex Mono',monospace; font-size:10px;">
           <span class="dot dot-green dot-pulse" id="stream-dot"></span>
           <span id="stream-status">connecting…</span>
         </div>
-      </div>
-    </div>
+
+        <!-- backfill progress — replaces status chip during scan -->
+        <div id="backfill-progress-widget" style="display:none;align-items:center;gap:7px;
+             font-family:'IBM Plex Mono',monospace;font-size:10px;">
+          <div style="width:120px;height:6px;background:var(--bg3);border-radius:3px;overflow:hidden;border:1px solid var(--border);">
+            <div id="backfill-progress-fill" style="height:100%;width:0%;background:var(--cyan);
+                 border-radius:3px;transition:width .4s ease;"></div>
+          </div>
+          <span id="backfill-progress-label" style="color:var(--cyan);white-space:nowrap;min-width:80px;"></span>
+        </div>
+      </div><!-- /flex row -->
+    </div><!-- /col-head -->
     <div class="ev-header-row">
       <span>time</span><span style="text-align:right">block</span><span>topic</span><span>data</span>
     </div>
@@ -699,9 +803,14 @@
       <div id="node0-body" style="padding:0 14px 8px;"></div>
     </div>
     <!-- Node 1 - compact -->
-    <div style="flex-shrink:0;">
+    <div style="flex-shrink:0;border-bottom:1px solid var(--border);">
       <div style="padding:6px 14px 4px;font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);">Provisioner 1</div>
       <div id="node1-body" style="padding:0 14px 8px;"></div>
+    </div>
+    <!-- Node 2 - compact -->
+    <div style="flex-shrink:0;">
+      <div style="padding:6px 14px 4px;font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);">Provisioner 2</div>
+      <div id="node2-body" style="padding:0 14px 8px;"></div>
     </div>
   </div>
 
@@ -763,6 +872,15 @@
         </span>
         <span id="alloc-prov1-sk-indicator" style="font-size:9px;color:var(--dim);">no SK</span>
       </label>
+      <label id="alloc-prov2-label" style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 10px;border:1px solid var(--border);border-radius:4px;">
+        <input type="checkbox" id="alloc-check-2" style="accent-color:var(--cyan);width:14px;height:14px;">
+        <span style="flex:1;">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;">Provisioner 2</span>
+          <span id="alloc-prov2-status" style="font-size:10px;color:var(--muted);margin-left:8px;"></span><br>
+          <span id="alloc-prov2-addr"  style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--dim);">—</span>
+        </span>
+        <span id="alloc-prov2-sk-indicator" style="font-size:9px;color:var(--dim);">no SK</span>
+      </label>
     </div>
     <input class="modal-input" id="alloc-amt" type="number" placeholder="Amount in DUSK per selected provisioner" min="1" style="margin-bottom:4px;">
     <div id="alloc-status" style="font-size:11px;min-height:16px;color:var(--dim);margin-bottom:8px;"></div>
@@ -795,6 +913,14 @@
           <span id="deact-prov1-addr" style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--dim);">—</span>
         </span>
       </label>
+      <label id="deact-prov2-label" style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 10px;border:1px solid var(--border);border-radius:4px;">
+        <input type="radio" name="deact-prov" id="deact-radio-2" value="2" style="accent-color:var(--yellow);width:14px;height:14px;">
+        <span style="flex:1;">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;">Provisioner 2</span>
+          <span id="deact-prov2-status" style="font-size:10px;color:var(--muted);margin-left:8px;"></span><br>
+          <span id="deact-prov2-addr" style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--dim);">—</span>
+        </span>
+      </label>
     </div>
     <div id="deact-status" style="font-size:11px;min-height:16px;color:var(--dim);margin-bottom:8px;"></div>
     <div class="modal-actions">
@@ -807,6 +933,84 @@
 <!-- Liquidate -->
 
 <!-- Terminate -->
+
+<!-- Liquidate only -->
+<div class="modal-overlay" id="modal-liquidate">
+  <div class="modal">
+    <div class="modal-title">Liquidate</div>
+    <div class="modal-body" style="margin-bottom:12px;">Slashes the provisioner's stake and returns funds to pool. Does <strong>not</strong> terminate — provisioner remains in inactive state afterwards. Use when you want to reclaim stake but keep the provisioner registered.</div>
+    <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:12px;">
+      <label id="liq-prov0-label" style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 10px;border:1px solid var(--border);border-radius:4px;">
+        <input type="radio" name="liq-prov" id="liq-radio-0" value="0" style="accent-color:var(--yellow);width:14px;height:14px;">
+        <span style="flex:1;">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;">Provisioner 0</span>
+          <span id="liq-prov0-status" style="font-size:10px;color:var(--muted);margin-left:8px;"></span><br>
+          <span id="liq-prov0-addr" style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--dim);">—</span>
+        </span>
+      </label>
+      <label id="liq-prov1-label" style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 10px;border:1px solid var(--border);border-radius:4px;">
+        <input type="radio" name="liq-prov" id="liq-radio-1" value="1" style="accent-color:var(--yellow);width:14px;height:14px;">
+        <span style="flex:1;">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;">Provisioner 1</span>
+          <span id="liq-prov1-status" style="font-size:10px;color:var(--muted);margin-left:8px;"></span><br>
+          <span id="liq-prov1-addr" style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--dim);">—</span>
+        </span>
+      </label>
+      <label id="liq-prov2-label" style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 10px;border:1px solid var(--border);border-radius:4px;">
+        <input type="radio" name="liq-prov" id="liq-radio-2" value="2" style="accent-color:var(--yellow);width:14px;height:14px;">
+        <span style="flex:1;">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;">Provisioner 2</span>
+          <span id="liq-prov2-status" style="font-size:10px;color:var(--muted);margin-left:8px;"></span><br>
+          <span id="liq-prov2-addr" style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--dim);">—</span>
+        </span>
+      </label>
+    </div>
+    <div id="liq-status" style="font-size:11px;min-height:16px;color:var(--dim);margin-bottom:8px;"></div>
+    <div class="modal-actions">
+      <button class="mbtn mbtn-cancel" onclick="closeModal('modal-liquidate')">cancel</button>
+      <button class="mbtn mbtn-danger" onclick="doLiquidate()">liquidate</button>
+    </div>
+  </div>
+</div>
+
+<!-- Terminate only -->
+<div class="modal-overlay" id="modal-terminate">
+  <div class="modal">
+    <div class="modal-title">Terminate</div>
+    <div class="modal-body" style="margin-bottom:12px;">Removes provisioner from the contract registry. Provisioner must be liquidated first (inactive with 0 stake). Use after a standalone liquidate to fully clean up.</div>
+    <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:12px;">
+      <label id="term-prov0-label" style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 10px;border:1px solid var(--border);border-radius:4px;">
+        <input type="radio" name="term-prov" id="term-radio-0" value="0" style="accent-color:var(--yellow);width:14px;height:14px;">
+        <span style="flex:1;">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;">Provisioner 0</span>
+          <span id="term-prov0-status" style="font-size:10px;color:var(--muted);margin-left:8px;"></span><br>
+          <span id="term-prov0-addr" style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--dim);">—</span>
+        </span>
+      </label>
+      <label id="term-prov1-label" style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 10px;border:1px solid var(--border);border-radius:4px;">
+        <input type="radio" name="term-prov" id="term-radio-1" value="1" style="accent-color:var(--yellow);width:14px;height:14px;">
+        <span style="flex:1;">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;">Provisioner 1</span>
+          <span id="term-prov1-status" style="font-size:10px;color:var(--muted);margin-left:8px;"></span><br>
+          <span id="term-prov1-addr" style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--dim);">—</span>
+        </span>
+      </label>
+      <label id="term-prov2-label" style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 10px;border:1px solid var(--border);border-radius:4px;">
+        <input type="radio" name="term-prov" id="term-radio-2" value="2" style="accent-color:var(--yellow);width:14px;height:14px;">
+        <span style="flex:1;">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;">Provisioner 2</span>
+          <span id="term-prov2-status" style="font-size:10px;color:var(--muted);margin-left:8px;"></span><br>
+          <span id="term-prov2-addr" style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--dim);">—</span>
+        </span>
+      </label>
+    </div>
+    <div id="term-status" style="font-size:11px;min-height:16px;color:var(--dim);margin-bottom:8px;"></div>
+    <div class="modal-actions">
+      <button class="mbtn mbtn-cancel" onclick="closeModal('modal-terminate')">cancel</button>
+      <button class="mbtn mbtn-danger" onclick="doTerminate()">terminate</button>
+    </div>
+  </div>
+</div>
 
 <!-- Liquidate + Terminate -->
 <div class="modal-overlay" id="modal-liq-term">
@@ -828,6 +1032,14 @@
           <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;">Provisioner 1</span>
           <span id="liqterm-prov1-status" style="font-size:10px;color:var(--muted);margin-left:8px;"></span><br>
           <span id="liqterm-prov1-addr" style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--dim);">—</span>
+        </span>
+      </label>
+      <label id="liqterm-prov2-label" style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 10px;border:1px solid var(--border);border-radius:4px;">
+        <input type="radio" name="liqterm-prov" id="liqterm-radio-2" value="2" style="accent-color:var(--yellow);width:14px;height:14px;">
+        <span style="flex:1;">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;">Provisioner 2</span>
+          <span id="liqterm-prov2-status" style="font-size:10px;color:var(--muted);margin-left:8px;"></span><br>
+          <span id="liqterm-prov2-addr" style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--dim);">—</span>
         </span>
       </label>
     </div>
@@ -869,7 +1081,9 @@
 
 <script>
 // ── CONFIG ───────────────────────────────────────────────────────────────────
-const API = "http://localhost:7373"
+const API = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+  ? `${window.location.protocol}//localhost:7373`
+  : `${window.location.protocol}//${window.location.host}`
 
 // ── PASSWORD ──────────────────────────────────────────────────────────────────
 function getPassword() {
@@ -1084,7 +1298,7 @@ function closeModal(id)      { document.getElementById(id).classList.remove('ope
 
 // ── LIVE PROVISIONER PANEL ───────────────────────────────────────────────────
 
-function renderNodeCard(idx, node, container) {
+function renderNodeCard(idx, node, container, syncInfo) {
   if (!container) return
   const s      = node.status || 'inactive'
   const amount = node.amount_dusk
@@ -1096,14 +1310,39 @@ function renderNodeCard(idx, node, container) {
   const transitions = (node.transitions !== null && node.transitions !== undefined)
     ? node.transitions : '—'
 
-  // Use server-computed label: "active (3 trans)" / "maturing (1 trans)" / "inactive (0 trans)"
+  // Use server-computed label: "active (3 trans)" / "maturing (1 trans)" / "seeded (0 trans)" / "inactive (0 trans)"
   const statusLabel = (node.status_label || s).replace('active','● active')
                                                .replace('maturing','◑ maturing')
+                                               .replace('seeded','◎ seeded')
                                                .replace('inactive','○ inactive')
   const activeBlock = node.active_block
     ? `block #${node.active_block.toLocaleString()} (epoch ${node.active_epoch})`
     : null
   const noData = !node.has_stake && !node.ok
+
+  // Sync height row
+  let syncHtml = ''
+  if (syncInfo) {
+    if (!syncInfo.ok || syncInfo.height === null) {
+      syncHtml = `<div class="prov-row"><span>Block height</span><span style="color:var(--dim)">${syncInfo.error || '—'}</span></div>`
+    } else {
+      const h = syncInfo.height
+      const tip = syncInfo.network_tip
+      const delta = (tip !== null && tip !== undefined) ? tip - h : null
+      let deltaColor = 'var(--green)'
+      let deltaLabel = ''
+      if (delta === null) {
+        deltaLabel = ''
+      } else if (delta <= 2) {
+        deltaColor = 'var(--green)'; deltaLabel = ' ✓'
+      } else if (delta <= 10) {
+        deltaColor = 'var(--yellow)'; deltaLabel = ` -${delta}`
+      } else {
+        deltaColor = 'var(--red)'; deltaLabel = ` -${delta}`
+      }
+      syncHtml = `<div class="prov-row"><span>Block height</span><span style="color:${deltaColor}">${h.toLocaleString()}${deltaLabel}</span></div>`
+    }
+  }
 
   container.innerHTML = `
     <div class="prov-card">
@@ -1111,6 +1350,7 @@ function renderNodeCard(idx, node, container) {
       <div class="prov-row"><span>Eligible Stake</span><span>${amount}</span></div>
       ${slashed ? `<div class="prov-row"><span>Slashed (reclaimable)</span><span style="color:var(--orange)">${slashed}</span></div>` : ''}
       ${activeBlock && s !== 'active' ? `<div class="prov-row"><span>Active from</span><span style="color:var(--cyan)">${activeBlock}</span></div>` : ''}
+      ${syncHtml}
     </div>
     ${noData ? '<div style="font-size:10px;color:var(--dim);padding:2px 0">set password to load stake data</div>' : ''}
   `
@@ -1128,10 +1368,17 @@ function updateLivePanel(data) {
     dot.style.boxShadow  = '0 0 5px var(--green)'
   }
   const nodes = data.nodes || {}
+  const sync  = data.sync  || {}
+  const tip   = data.tip
   renderNodeCard(0, nodes['0'] || {status:'inactive', has_stake:false, ok:false},
-                 document.getElementById('node0-body'))
+                 document.getElementById('node0-body'),
+                 sync['0'] ? {...sync['0'], network_tip: tip} : null)
   renderNodeCard(1, nodes['1'] || {status:'inactive', has_stake:false, ok:false},
-                 document.getElementById('node1-body'))
+                 document.getElementById('node1-body'),
+                 sync['1'] ? {...sync['1'], network_tip: tip} : null)
+  renderNodeCard(2, nodes['2'] || {status:'inactive', has_stake:false, ok:false},
+                 document.getElementById('node2-body'),
+                 sync['2'] ? {...sync['2'], network_tip: tip} : null)
 }
 
 async function cmdRecycle() {
@@ -1153,13 +1400,19 @@ async function cmdRecycle() {
 async function fetchLivePanel() {
   try {
     const pw  = getPassword()
-    // Always POST — password goes in JSON body, never in URL
-    const r   = await fetch(`${API}/api/provisioner/live`, {
-      method:  'POST',
-      headers: {'Content-Type': 'application/json'},
-      body:    JSON.stringify(pw ? {password: pw} : {}),
-    })
-    const d   = await r.json()
+    // Fetch live stake info and node sync heights in parallel
+    const [liveRes, syncRes] = await Promise.all([
+      fetch(`${API}/api/provisioner/live`, {
+        method:  'POST',
+        headers: {'Content-Type': 'application/json'},
+        body:    JSON.stringify(pw ? {password: pw} : {}),
+      }),
+      fetch(`${API}/api/nodes/sync`).catch(() => null),
+    ])
+    const d    = await liveRes.json()
+    const sync = syncRes ? await syncRes.json().catch(() => ({})) : {}
+    // Merge sync node data into live panel data for renderNodeCard
+    d.sync = sync.nodes || {}
     updateLivePanel(d)
   } catch(e) {
     const dot = document.getElementById('live-dot')
@@ -1184,6 +1437,13 @@ async function loadConfig() {
     document.getElementById('cfg-operator').value     = _cfg.operator_address ?? ''
     document.getElementById('cfg-prov0-addr').value  = _cfg.prov_0_address || ''
     document.getElementById('cfg-prov1-addr').value  = _cfg.prov_1_address || ''
+    document.getElementById('cfg-prov2-addr').value  = _cfg.prov_2_address || ''
+    // Node log paths
+    if (document.getElementById('cfg-node0-log')) {
+      document.getElementById('cfg-node0-log').value = _cfg.node_0_log || '/var/log/rusk-1.log'
+      document.getElementById('cfg-node1-log').value = _cfg.node_1_log || '/var/log/rusk-2.log'
+      document.getElementById('cfg-node2-log').value = _cfg.node_2_log || '/var/log/rusk-3.log'
+    }
     document.getElementById('cfg-stake-limit').value    = _cfg.operator_stake_limit ?? 3000000
     document.getElementById('cfg-max-slash-pct').value  = _cfg.max_slash_pct != null ? (_cfg.max_slash_pct * 100).toFixed(1) : '2.0'
     document.getElementById('cfg-rotation').value     = _cfg.rotation_window ?? 100
@@ -1193,14 +1453,18 @@ async function loadConfig() {
     if (document.getElementById('cfg-prov0-sk')) {
       document.getElementById('cfg-prov0-sk').value    = ''  // never pre-fill SK
       document.getElementById('cfg-prov1-sk').value    = ''
+      if (document.getElementById('cfg-prov2-sk')) document.getElementById('cfg-prov2-sk').value = ''
       document.getElementById('cfg-seed-dusk').value   = _cfg.rotation_seed_dusk ?? 1000
       // SK set indicators
       const sk0status = document.getElementById('cfg-prov0-sk-status')
       const sk1status = document.getElementById('cfg-prov1-sk-status')
+      const sk2status = document.getElementById('cfg-prov2-sk-status')
       if (sk0status) sk0status.textContent = _cfg.prov_0_sk_set ? '✓ set' : 'not set'
       if (sk0status) sk0status.style.color = _cfg.prov_0_sk_set ? 'var(--green)' : 'var(--dim)'
       if (sk1status) sk1status.textContent = _cfg.prov_1_sk_set ? '✓ set' : 'not set'
       if (sk1status) sk1status.style.color = _cfg.prov_1_sk_set ? 'var(--green)' : 'var(--dim)'
+      if (sk2status) sk2status.textContent = _cfg.prov_2_sk_set ? '✓ set' : 'not set'
+      if (sk2status) sk2status.style.color = _cfg.prov_2_sk_set ? 'var(--green)' : 'var(--dim)'
       // Auto-detect provisioner addresses from wallet
       fetch(`${API}/api/provisioner/addresses`, {method:'POST',
         headers:{'Content-Type':'application/json'},
@@ -1208,12 +1472,15 @@ async function loadConfig() {
       }).then(r=>r.json()).then(d=>{
         const a0 = d.addresses?.['0'] || ''
         const a1 = d.addresses?.['1'] || ''
+        const a2 = d.addresses?.['2'] || ''
         const d0 = document.getElementById('cfg-prov0-addr-display')
         const d1 = document.getElementById('cfg-prov1-addr-display')
+        const d2 = document.getElementById('cfg-prov2-addr-display')
         if (d0) d0.textContent = a0 ? a0.slice(0,12)+'…'+a0.slice(-6) : '—'
         if (d1) d1.textContent = a1 ? a1.slice(0,12)+'…'+a1.slice(-6) : '—'
+        if (d2) d2.textContent = a2 ? a2.slice(0,12)+'…'+a2.slice(-6) : '—'
         // Update own prefixes with fresh addresses
-        const allAddrs2 = [d.operator, a0, a1].filter(Boolean)
+        const allAddrs2 = [d.operator, a0, a1, a2].filter(Boolean)
         _ownPrefixes = [...new Set(allAddrs2.map(a=>a.slice(0,8)).filter(p=>p.length===8))]
       }).catch(()=>{})
     }
@@ -1237,6 +1504,10 @@ async function saveConfig() {
     operator_address:     document.getElementById('cfg-operator').value.trim(),
     prov_0_address:       document.getElementById('cfg-prov0-addr').value.trim(),
     prov_1_address:       document.getElementById('cfg-prov1-addr').value.trim(),
+    prov_2_address:       document.getElementById('cfg-prov2-addr').value.trim(),
+    node_0_log:           document.getElementById('cfg-node0-log')?.value.trim() || '/var/log/rusk-1.log',
+    node_1_log:           document.getElementById('cfg-node1-log')?.value.trim() || '/var/log/rusk-2.log',
+    node_2_log:           document.getElementById('cfg-node2-log')?.value.trim() || '/var/log/rusk-3.log',
     operator_stake_limit: parseFloat(document.getElementById('cfg-stake-limit').value),
     max_slash_pct:        parseFloat(document.getElementById('cfg-max-slash-pct').value || '2'),
     rotation_window:      parseInt(document.getElementById('cfg-rotation').value),
@@ -1247,8 +1518,10 @@ async function saveConfig() {
   try {
     const sk0 = document.getElementById('cfg-prov0-sk')?.value.trim()
     const sk1 = document.getElementById('cfg-prov1-sk')?.value.trim()
+    const sk2 = document.getElementById('cfg-prov2-sk')?.value.trim()
     if (sk0) payload.prov_0_sk = sk0
     if (sk1) payload.prov_1_sk = sk1
+    if (sk2) payload.prov_2_sk = sk2
     const r = await fetch(`${API}/api/config`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -1292,6 +1565,8 @@ function openModal(id) {
   if (id === 'modal-alloc-stake') _populateAllocModal()
   if (id === 'modal-deactivate')  _populateAddrModal('deact')
   if (id === 'modal-liq-term')    _populateAddrModal('liqterm')
+  if (id === 'modal-liquidate')   _populateAddrModal('liq')
+  if (id === 'modal-terminate')   _populateAddrModal('term')
 }
 
 document.addEventListener('click', e => {
@@ -1351,7 +1626,7 @@ async function _populateAllocModal() {
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({password:getPassword()})}).then(r=>r.json()).catch(()=>({}))
 
-  for (const idx of [0,1]) {
+  for (const idx of [0,1,2]) {
     const addr  = addr_r.addresses?.[String(idx)] || ''
     const short = addr ? addr.slice(0,10)+'…'+addr.slice(-6) : '—'
     const node  = live_r.nodes?.[String(idx)] || {}
@@ -1379,7 +1654,7 @@ async function doAllocateStake() {
     document.getElementById('alloc-status').textContent = 'Enter an amount ≥ 1 DUSK'
     return
   }
-  const checked = [0,1].filter(i => document.getElementById(`alloc-check-${i}`)?.checked)
+  const checked = [0,1,2].filter(i => document.getElementById(`alloc-check-${i}`)?.checked)
   if (checked.length === 0) {
     document.getElementById('alloc-status').textContent = 'Select at least one provisioner'
     return
@@ -1396,14 +1671,18 @@ async function doAllocateStake() {
 // Populate radio-button modals with live provisioner data
 // prefix = 'deact' | 'liqterm' | 'remove'
 async function _populateAddrModal(prefix) {
-  const live_r = await fetch(`${API}/api/provisioner/live`, {method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({password: getPassword()})
-  }).then(r=>r.json()).catch(()=>({}))
+  const [live_r, cfg_r] = await Promise.all([
+    fetch(`${API}/api/provisioner/live`, {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({password: getPassword()})
+    }).then(r=>r.json()).catch(()=>({})),
+    fetch(`${API}/api/config`, {credentials:'include'}).then(r=>r.json()).catch(()=>({}))
+  ])
 
-  for (const idx of [0, 1]) {
+  for (const idx of [0, 1, 2]) {
     const node   = live_r.nodes?.[String(idx)] || {}
-    const addr   = node.staking_address || ''
+    // prefer live staking_address, fall back to config prov_N_address
+    const addr   = node.staking_address || cfg_r[`prov_${idx}_address`] || ''
     const short  = addr ? addr.slice(0,10)+'…'+addr.slice(-6) : '—'
     const stake  = node.amount_dusk ? `${(node.amount_dusk/1e6).toFixed(2)}M DUSK` : ''
     const status = node.status_label || ''
@@ -1429,6 +1708,28 @@ async function doDeactivateStake() {
     {provisioner_address: addr})
 }
 
+
+async function doLiquidate() {
+  const sel = document.querySelector('input[name="liq-prov"]:checked')
+  if (!sel) { document.getElementById('liq-status').textContent = 'Select a provisioner'; return }
+  const idx  = parseInt(sel.value)
+  const addr = document.getElementById(`liq-prov${idx}-addr`).dataset.full || ''
+  if (!addr) { document.getElementById('liq-status').textContent = 'No address — run stake info first'; return }
+  document.getElementById('liq-status').textContent = `Liquidating prov[${idx}]…`
+  provAction(`liquidate prov[${idx}]`, '/api/provisioner/liquidate',
+    {provisioner_address: addr})
+}
+
+async function doTerminate() {
+  const sel = document.querySelector('input[name="term-prov"]:checked')
+  if (!sel) { document.getElementById('term-status').textContent = 'Select a provisioner'; return }
+  const idx  = parseInt(sel.value)
+  const addr = document.getElementById(`term-prov${idx}-addr`).dataset.full || ''
+  if (!addr) { document.getElementById('term-status').textContent = 'No address — run stake info first'; return }
+  document.getElementById('term-status').textContent = `Terminating prov[${idx}]…`
+  provAction(`terminate prov[${idx}]`, '/api/provisioner/terminate',
+    {provisioner_address: addr})
+}
 
 async function doLiquidateAndTerminate() {
   const sel = document.querySelector('input[name="liqterm-prov"]:checked')
@@ -1539,31 +1840,87 @@ async function pollRotationStatus() {
 setInterval(pollRotationStatus, 10000)
 pollRotationStatus()
 
-// ── MINE-ONLY FILTERS ────────────────────────────────────────────────────────
+// ── EVENTS FILTER ────────────────────────────────────────────────────────────
+let _evTopicFilter = ''
 
-function applyEventsMineFilter() {
-  const mineOnly = document.getElementById('events-mine-only')?.checked
-  document.querySelectorAll('#events-body .event-row').forEach(row => {
-    if (mineOnly) {
-      row.style.display = row.classList.contains('ev-mine') ? '' : 'none'
-    } else {
-      row.style.display = ''
+function toggleEvFilter() {
+  const panel = document.getElementById('ev-filter-panel')
+  const btn   = document.getElementById('ev-filter-btn')
+  const isOpen = panel.style.display !== 'none'
+  if (isOpen) { panel.style.display = 'none'; return }
+
+  // Position panel below button, right-aligned but clamped to viewport
+  const r = btn.getBoundingClientRect()
+  const panelW = 270
+  let left = r.right - panelW
+  if (left < 8) left = 8  // don't clip left edge
+  panel.style.top  = (r.bottom + 6) + 'px'
+  panel.style.left = left + 'px'
+  panel.style.display = 'block'
+
+  setTimeout(() => {
+    const handler = (e) => {
+      if (!panel.contains(e.target) && !btn.contains(e.target)) {
+        panel.style.display = 'none'
+        document.removeEventListener('click', handler)
+      }
     }
+    document.addEventListener('click', handler)
+  }, 0)
+}
+
+function setTopicFilter(btn, topic) {
+  _evTopicFilter = topic
+  document.querySelectorAll('#ev-topic-chips .topic-chip').forEach(c => c.classList.remove('active'))
+  btn.classList.add('active')
+  applyEventsFilter()
+}
+
+function applyEventsFilter() {
+  const mineOnly   = document.getElementById('events-mine-only')?.checked
+  const blockVal   = document.getElementById('ev-block-filter')?.value.trim()
+  const blockNum   = blockVal ? parseInt(blockVal) : null
+
+  document.querySelectorAll('#events-body .event-row').forEach(row => {
+    let show = true
+    if (mineOnly && !row.classList.contains('ev-mine'))     show = false
+    if (_evTopicFilter && row.dataset.topic !== _evTopicFilter) show = false
+    if (blockNum !== null && parseInt(row.dataset.height) !== blockNum) show = false
+    row.style.display = show ? '' : 'none'
   })
-  // Update empty-state visibility
+
+  // Badge: count active non-default filters
+  let active = 0
+  if (mineOnly)          active++
+  if (_evTopicFilter)    active++
+  if (blockNum !== null) active++
+  const badge = document.getElementById('ev-filter-badge')
+  const btn   = document.getElementById('ev-filter-btn')
+  if (active > 0) {
+    badge.textContent = active
+    badge.style.display = ''
+    btn.style.color = 'var(--cyan)'
+    btn.style.borderColor = 'var(--cyan)'
+  } else {
+    badge.style.display = 'none'
+    btn.style.color = 'var(--dim)'
+    btn.style.borderColor = 'var(--border)'
+  }
+
+  // Empty state
   const body = document.getElementById('events-body')
   const visible = body.querySelectorAll('.event-row:not([style*="none"])').length
-  if (visible === 0 && mineOnly) {
-    if (!body.querySelector('.ev-mine-empty')) {
-      const d = document.createElement('div')
-      d.className = 'ev-empty ev-mine-empty'
-      d.textContent = 'no events from your account yet'
-      body.appendChild(d)
-    }
-  } else {
-    body.querySelector('.ev-mine-empty')?.remove()
+  body.querySelector('.ev-filter-empty')?.remove()
+  if (visible === 0 && active > 0) {
+    const d = document.createElement('div')
+    d.className = 'ev-empty ev-filter-empty'
+    d.textContent = 'no events match current filters'
+    body.appendChild(d)
   }
 }
+
+// Keep old name working (called from txerr panel)
+function applyEventsMineFilter() { applyEventsFilter() }
 
 function applyTxErrMineFilter() {
   const mineOnly = document.getElementById('txerr-mine-only')?.checked
@@ -1588,9 +1945,9 @@ function applyTxErrMineFilter() {
   }
 }
 
-// Re-apply both filters after new rows are rendered (called from renderEvent / renderTxError)
+// Re-apply both filters after new rows are rendered
 function _reapplyFilters() {
-  if (document.getElementById('events-mine-only')?.checked) applyEventsMineFilter()
+  applyEventsFilter()
   if (document.getElementById('txerr-mine-only')?.checked) applyTxErrMineFilter()
 }
 
@@ -1626,8 +1983,9 @@ async function togglePollerErrors() {
 
 async function doBackfill() {
   const n = parseInt(document.getElementById('backfill-n')?.value || '100')
-  const btn = document.querySelector('[onclick="doBackfill()"]')
-  if (btn) { btn.textContent = 'scanning…'; btn.disabled = true }
+  const parallel = parseInt(document.getElementById('backfill-parallel')?.value || '10')
+  const btn = document.getElementById('backfill-btn')
+  if (btn) { btn.textContent = 'starting…'; btn.disabled = true }
 
   // Clear DOM and dedup set so backfilled events can re-render via SSE
   document.getElementById('events-body').innerHTML = ''
@@ -1637,14 +1995,61 @@ async function doBackfill() {
     await fetch(`${API}/api/events/backfill`, {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({blocks: n})
+      body: JSON.stringify({blocks: n, parallel: parallel})
     })
+    // Start polling progress
+    _pollBackfillProgress()
   } catch(e) {
     console.error('backfill error', e)
     document.getElementById('stream-status').textContent = 'backfill error'
   } finally {
-    if (btn) { btn.textContent = 'backfill'; btn.disabled = false }
+    if (btn) { btn.textContent = 'go'; btn.disabled = false }
   }
+}
+
+let _backfillPollTimer = null
+async function _pollBackfillProgress() {
+  if (_backfillPollTimer) clearInterval(_backfillPollTimer)
+
+  const widget     = document.getElementById('backfill-progress-widget')
+  const fill       = document.getElementById('backfill-progress-fill')
+  const label      = document.getElementById('backfill-progress-label')
+  const statusChip = document.getElementById('events-stream-chip')
+  const dot        = document.getElementById('stream-dot')
+  const status     = document.getElementById('stream-status')
+
+  // Show progress widget, hide normal status chip
+  if (statusChip) statusChip.style.display = 'none'
+  widget.style.display = 'flex'
+  fill.style.width = '0%'
+  label.textContent = 'starting…'
+
+  _backfillPollTimer = setInterval(async () => {
+    try {
+      const r = await fetch(`${API}/api/events/backfill_progress`, {credentials: 'include'})
+      const d = await r.json()
+
+      // Not started yet — wait
+      if (!d.running && d.total === 0) return
+
+      const pct = d.pct || 0
+      fill.style.width  = pct + '%'
+      label.textContent = `${pct}%  (${d.done.toLocaleString()}/${d.total.toLocaleString()})`
+
+      if (!d.running && d.total > 0) {
+        clearInterval(_backfillPollTimer)
+        _backfillPollTimer = null
+        fill.style.width  = '100%'
+        label.textContent = '100%  ✓'
+        setTimeout(() => {
+          widget.style.display = 'none'
+          if (statusChip) statusChip.style.display = ''
+          dot.className = 'dot dot-green dot-pulse'
+          status.textContent = 'live'
+        }, 2000)
+      }
+    } catch(e) { label.textContent = `err: ${e.message}` }
+  }, 1000)
 }
 
 
@@ -1706,6 +2111,7 @@ function renderEvent(entry) {
   const row = document.createElement('div')
   row.className = 'event-row'
   row.dataset.height = entry.height
+  row.dataset.topic  = entry.topic || ''
   // Store full searchable content for later re-highlight when prefixes arrive
   row.dataset.haystack = JSON.stringify(entry.decoded || '') + (entry.data || '')
   const cls = TOPIC_CLASS[entry.topic] || 'topic-default'
@@ -1852,6 +2258,7 @@ async function _updateOwnPrefixes() {
   if (op) allAddrs.push(op)
   if (_cfg?.prov_0_address) allAddrs.push(_cfg.prov_0_address)
   if (_cfg?.prov_1_address) allAddrs.push(_cfg.prov_1_address)
+  if (_cfg?.prov_2_address) allAddrs.push(_cfg.prov_2_address)
   try {
     const d = await fetch(`${API}/api/provisioner/addresses`, {method:'POST',
       headers:{'Content-Type':'application/json'},
@@ -1930,7 +2337,7 @@ _updateOwnPrefixes().finally(() => {
 
 <!-- Config modal -->
 <div class="modal-overlay" id="modal-config">
-  <div class="modal" style="min-width:520px;max-width:600px;">
+  <div class="modal" style="min-width:520px;max-width:600px;max-height:90vh;overflow-y:auto;">
     <div class="modal-title">Dashboard Configuration</div>
     <div class="modal-body" style="margin-bottom:12px;">Settings are persisted server-side in <code>~/.sozu_dashboard_config.json</code></div>
 
@@ -1950,6 +2357,9 @@ _updateOwnPrefixes().finally(() => {
       <label style="font-size:11px;color:var(--muted);">Provisioner 1 Address<br><span style="font-size:10px;color:var(--dim)">for event highlighting</span></label>
       <input class="modal-input" id="cfg-prov1-addr" type="text" style="margin:0;" placeholder="Staking address (base58)">
 
+      <label style="font-size:11px;color:var(--muted);">Provisioner 2 Address<br><span style="font-size:10px;color:var(--dim)">for event highlighting</span></label>
+      <input class="modal-input" id="cfg-prov2-addr" type="text" style="margin:0;" placeholder="Staking address (base58)">
+
       <label style="font-size:11px;color:var(--muted);">Stake Limit (DUSK)<br><span style="font-size:10px;color:var(--dim)">total across all provisioners</span></label>
       <input class="modal-input" id="cfg-stake-limit" type="number" style="margin:0;" placeholder="3000000">
 
@@ -1965,12 +2375,25 @@ _updateOwnPrefixes().finally(() => {
       <label style="font-size:11px;color:var(--muted);">Backfill Blocks<br><span style="font-size:10px;color:var(--dim)">Blocks to scan on poller startup</span></label>
       <input class="modal-input" id="cfg-backfill" type="number" style="margin:0;" placeholder="200">
 
+      <label style="font-size:11px;color:var(--muted);grid-column:1/-1;margin-top:8px;border-top:1px solid var(--border);padding-top:8px;color:var(--cyan);">Node Log Paths</label>
+      <label style="font-size:11px;color:var(--muted);">Node 0 Log<br><span style="font-size:10px;color:var(--dim)">/var/log/rusk-1.log</span></label>
+      <input class="modal-input" id="cfg-node0-log" type="text" style="margin:0;" placeholder="/var/log/rusk-1.log">
+
+      <label style="font-size:11px;color:var(--muted);">Node 1 Log<br><span style="font-size:10px;color:var(--dim)">/var/log/rusk-2.log</span></label>
+      <input class="modal-input" id="cfg-node1-log" type="text" style="margin:0;" placeholder="/var/log/rusk-2.log">
+
+      <label style="font-size:11px;color:var(--muted);">Node 2 Log<br><span style="font-size:10px;color:var(--dim)">/var/log/rusk-3.log</span></label>
+      <input class="modal-input" id="cfg-node2-log" type="text" style="margin:0;" placeholder="/var/log/rusk-3.log">
+
       <label style="font-size:11px;color:var(--muted);grid-column:1/-1;margin-top:8px;border-top:1px solid var(--border);padding-top:8px;color:var(--cyan);">Rotation</label>
       <label style="font-size:11px;color:var(--muted);">Prov 0 Address<br><span style="font-size:10px;color:var(--dim)">auto-detected from wallet</span></label>
       <span id="cfg-prov0-addr-display" style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--muted);">—</span>
 
       <label style="font-size:11px;color:var(--muted);">Prov 1 Address<br><span style="font-size:10px;color:var(--dim)">auto-detected from wallet</span></label>
       <span id="cfg-prov1-addr-display" style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--muted);">—</span>
+
+      <label style="font-size:11px;color:var(--muted);">Prov 2 Address<br><span style="font-size:10px;color:var(--dim)">auto-detected from wallet</span></label>
+      <span id="cfg-prov2-addr-display" style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--muted);">—</span>
 
       <label style="font-size:11px;color:var(--muted);">Prov 0 SK<br><span style="font-size:10px;color:var(--dim)">stored in ~/.sozu_keys (600)</span></label>
       <div style="display:flex;align-items:center;gap:8px;">
@@ -1982,6 +2405,12 @@ _updateOwnPrefixes().finally(() => {
       <div style="display:flex;align-items:center;gap:8px;">
         <input class="modal-input" id="cfg-prov1-sk" type="password" style="margin:0;flex:1;" placeholder="leave blank to keep existing">
         <span id="cfg-prov1-sk-status" style="font-size:10px;color:var(--dim);white-space:nowrap;">not set</span>
+      </div>
+
+      <label style="font-size:11px;color:var(--muted);">Prov 2 SK<br><span style="font-size:10px;color:var(--dim)">stored in ~/.sozu_keys (600)</span></label>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input class="modal-input" id="cfg-prov2-sk" type="password" style="margin:0;flex:1;" placeholder="leave blank to keep existing">
+        <span id="cfg-prov2-sk-status" style="font-size:10px;color:var(--dim);white-space:nowrap;">not set</span>
       </div>
 
       <label style="font-size:11px;color:var(--muted);">Rotation Seed (DUSK)<br><span style="font-size:10px;color:var(--dim)">reserved for re-seeding after liq+term</span></label>
